@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# ── Windows Git Bash fix ───────────────────────────────────────────────────────
+# Git Bash cannot exec the Windows App Store Python stub that gcloud's shell
+# wrapper resolves to by default. Override CLOUDSDK_PYTHON with the real
+# python.exe so gcloud works reliably in subshells. No-op on Linux/macOS.
+if [[ "$(uname -s)" =~ ^(MINGW|MSYS) ]]; then
+  export CLOUDSDK_PYTHON="$(cygpath -w "${HOME}")/AppData/Local/Microsoft/WindowsApps/python.exe"
+fi
+# ──────────────────────────────────────────────────────────────────────────────
+
 # =============================================================================
 # Snowflake Connector Proxy — Cloud Run + VPC Connector Setup
 # =============================================================================
@@ -28,8 +37,11 @@ set -euo pipefail
 #   Snowflake
 #
 # Security layers:
-#   1. Cloud Armor: allows only Google Cloud source IPs; denies everything
-#      else with HTTP 403 before the request reaches Cloud Run.
+#   1. Cloud Armor: attached to the LB backend; provides DDoS protection and
+#      a default deny-403 for all traffic not matched by an allow rule.
+#      NOTE: filtering by Google Cloud source IPs requires Cloud Armor Standard
+#      (paid tier). The default policy uses allow-all at priority 1000 so
+#      traffic flows through; tighten this rule once on the paid tier.
 #   2. Secret path: nginx returns 404 for any URL not containing
 #      PROXY_SECRET_PATH, preventing scanners from identifying the service.
 #
@@ -337,27 +349,32 @@ fi
 # ── Step 14: Cloud Armor security policy ──────────────────────────────────────
 # Attached to the backend service (Step 12) so evaluation happens at the LB
 # edge before requests reach Cloud Run. Two rules:
-#   priority 1000        — allow traffic from Google Cloud IP ranges
-#                          (Gemini Enterprise runs on Google infrastructure)
-#   priority 2147483647  — default deny-403 for everything else
-# To tighten further: inspect Cloud Run logs for a Gemini-specific header
-# (e.g. X-Goog-Api-Client) and add a header-match rule at priority 999.
+#   priority 1000        — allow all source IPs (see note below)
+#   priority 2147483647  — default deny-403 for anything not matched above
+#
+# NOTE: filtering by Google Cloud source IP ranges requires the Cloud Armor
+# Standard paid tier (evaluatePreconfiguredExpr('sourceiplist-google-cloud')
+# is only valid on that tier). The current allow rule permits all IPs and
+# relies on the secret path gate in nginx as the primary access control.
+# To upgrade: replace the priority-1000 rule with a Google Cloud IP list rule
+# once Cloud Armor Standard is enabled on the project.
 echo ""
 echo "=== Step 14: Cloud Armor security policy ==="
 if ! gcloud compute security-policies describe "${CLOUD_RUN_SERVICE_NAME}-armor" \
     --project="${PROJECT_ID}" &>/dev/null; then
   gcloud compute security-policies create "${CLOUD_RUN_SERVICE_NAME}-armor" \
-      --description="Allow only Google Cloud source IPs" \
+      --description="Cloud Armor policy — DDoS protection; secret path is primary gate" \
       --project="${PROJECT_ID}"
 
-  # Priority 1000: allow traffic from Google Cloud infrastructure (Gemini runs here)
+  # Priority 1000: allow all traffic — Cloud Armor Standard required for IP-range
+  # filtering; secret path in nginx (Step 8) is the application-level gate.
   gcloud compute security-policies rules create 1000 \
       --security-policy="${CLOUD_RUN_SERVICE_NAME}-armor" \
-      --expression="evaluatePreconfiguredExpr('sourceiplist-google-cloud')" \
       --action=allow \
+      --src-ip-ranges=0.0.0.0/0 \
       --project="${PROJECT_ID}"
 
-  # Default rule (priority 2147483647): deny everything else with 403
+  # Default rule (priority 2147483647): deny-403 as the fallback catch-all
   gcloud compute security-policies rules update 2147483647 \
       --security-policy="${CLOUD_RUN_SERVICE_NAME}-armor" \
       --action=deny-403 \
