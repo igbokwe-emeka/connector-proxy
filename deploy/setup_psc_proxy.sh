@@ -37,11 +37,9 @@ fi
 #   Snowflake
 #
 # Security layers:
-#   1. Cloud Armor: attached to the LB backend; provides DDoS protection and
-#      a default deny-403 for all traffic not matched by an allow rule.
-#      NOTE: filtering by Google Cloud source IPs requires Cloud Armor Standard
-#      (paid tier). The default policy uses allow-all at priority 1000 so
-#      traffic flows through; tighten this rule once on the paid tier.
+#   1. Cloud Armor: uses evaluateThreatIntelligence('iplist-public-clouds-gcp')
+#      to allow only Google Cloud Platform source IPs at the LB edge; all
+#      other traffic is denied with HTTP 403. Requires Cloud Armor Enterprise.
 #   2. Secret path: nginx returns 404 for any URL not containing
 #      PROXY_SECRET_PATH, preventing scanners from identifying the service.
 #
@@ -349,29 +347,28 @@ fi
 # ── Step 14: Cloud Armor security policy ──────────────────────────────────────
 # Attached to the backend service (Step 12) so evaluation happens at the LB
 # edge before requests reach Cloud Run. Two rules:
-#   priority 1000        — allow all source IPs (see note below)
+#   priority 1000        — allow only Google Cloud Platform source IPs
+#                          (Gemini Enterprise runs on GCP infrastructure)
 #   priority 2147483647  — default deny-403 for anything not matched above
 #
-# NOTE: filtering by Google Cloud source IP ranges requires the Cloud Armor
-# Standard paid tier (evaluatePreconfiguredExpr('sourceiplist-google-cloud')
-# is only valid on that tier). The current allow rule permits all IPs and
-# relies on the secret path gate in nginx as the primary access control.
-# To upgrade: replace the priority-1000 rule with a Google Cloud IP list rule
-# once Cloud Armor Standard is enabled on the project.
+# Uses evaluateThreatIntelligence('iplist-public-clouds-gcp') — the Google
+# Threat Intelligence feed for GCP IP ranges. Requires Cloud Armor Enterprise
+# subscription on the project (distinct from evaluatePreconfiguredExpr which
+# is for WAF rules and CDN IP lists only).
 echo ""
 echo "=== Step 14: Cloud Armor security policy ==="
 if ! gcloud compute security-policies describe "${CLOUD_RUN_SERVICE_NAME}-armor" \
     --project="${PROJECT_ID}" &>/dev/null; then
   gcloud compute security-policies create "${CLOUD_RUN_SERVICE_NAME}-armor" \
-      --description="Cloud Armor policy — DDoS protection; secret path is primary gate" \
+      --description="Allow GCP source IPs only via Threat Intelligence feed" \
       --project="${PROJECT_ID}"
 
-  # Priority 1000: allow all traffic — Cloud Armor Standard required for IP-range
-  # filtering; secret path in nginx (Step 8) is the application-level gate.
+  # Priority 1000: allow traffic from GCP IP ranges using the Threat Intelligence
+  # feed — only Google Cloud source IPs (where Gemini runs) are permitted.
   gcloud compute security-policies rules create 1000 \
       --security-policy="${CLOUD_RUN_SERVICE_NAME}-armor" \
+      --expression="evaluateThreatIntelligence('iplist-public-clouds-gcp')" \
       --action=allow \
-      --src-ip-ranges=0.0.0.0/0 \
       --project="${PROJECT_ID}"
 
   # Default rule (priority 2147483647): deny-403 as the fallback catch-all
