@@ -1,0 +1,50 @@
+events {
+    worker_connections 1024;
+}
+
+http {
+    access_log  /dev/stdout;
+    error_log   /dev/stderr;
+
+    server {
+        listen 8080;
+        server_name _;
+
+        # Required for MCP Server-Sent Events — disable all buffering so
+        # event stream chunks are forwarded to Gemini immediately.
+        proxy_buffering           off;
+        proxy_cache               off;
+        chunked_transfer_encoding on;
+
+        # Secret-path gate: only serve the UUID-prefixed location.
+        # PROXY_SECRET_PATH is substituted at container startup by entrypoint.sh.
+        location /${PROXY_SECRET_PATH}/ {
+            # Strip the secret prefix before forwarding — Snowflake expects
+            # paths like /api/v2/mcp/sse, not /<UUID>/api/v2/mcp/sse.
+            rewrite ^/${PROXY_SECRET_PATH}/(.*)$ /$1 break;
+
+            proxy_pass            https://${SNOWFLAKE_HOST}:${SNOWFLAKE_PORT};
+            proxy_http_version    1.1;
+
+            proxy_set_header      Host              "${SNOWFLAKE_HOST}";
+            proxy_set_header      Connection        "";
+
+            proxy_ssl_server_name on;
+            proxy_ssl_name        "${SNOWFLAKE_HOST}";
+            proxy_ssl_verify      on;
+            proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
+
+            proxy_pass_request_headers on;
+
+            proxy_connect_timeout 10s;
+            proxy_read_timeout    3600s;
+            proxy_send_timeout    3600s;
+        }
+
+        # Catch-all: return 404 for anything that doesn't include the secret
+        # path prefix — prevents scanners from identifying what this service does.
+        location / {
+            return 404;
+        }
+    }
+}
