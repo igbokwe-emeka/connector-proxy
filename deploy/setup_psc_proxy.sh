@@ -14,54 +14,45 @@ fi
 # Snowflake Connector Proxy — Cloud Run + VPC Connector Setup
 # =============================================================================
 # Provisions GCP resources so the Gemini Enterprise connector can reach
-# Snowflake through a customer-controlled static egress IP.
+# Snowflake through a customer-controlled static egress IP, with two
+# independent security layers (Cloud Armor + secret path) protecting the proxy.
 #
-# Hardening modes (set HARDENING_MODE in .env):
+# Traffic flow:
+#   Gemini Enterprise connector
+#       │  HTTPS  →  https://<LB_DOMAIN>/<PROXY_SECRET_PATH>/...
+#       ▼
+#   Cloud Armor  (blocks all non-Google-Cloud source IPs at the LB edge)
+#       ▼
+#   Global HTTPS Load Balancer  →  Serverless NEG
+#       ▼
+#   Cloud Run  (nginx — secret path gate, rewrites Host, proxies to Snowflake)
+#       │  --ingress=internal-and-cloud-load-balancing: direct Cloud Run URL
+#       │  is not reachable from the public internet
+#       │  --vpc-egress=all-traffic: all outbound traffic routed through VPC
+#       ▼
+#   Serverless VPC Access Connector
+#       ▼
+#   Cloud NAT  ──►  Static External IP  (allowlisted in Snowflake network policy)
+#       ▼
+#   Snowflake
 #
-#   A  — Secret path gate only (application layer)
-#        nginx returns 404 for any URL not containing PROXY_SECRET_PATH.
-#        Cloud Run is publicly accessible via its direct URL.
-#        No LB, no Cloud Armor required. Low cost.
+# Security layers:
+#   1. Cloud Armor: uses evaluateThreatIntelligence('iplist-public-clouds-gcp')
+#      to allow only Google Cloud Platform source IPs at the LB edge; all
+#      other traffic is denied with HTTP 403. Requires Cloud Armor Enterprise.
+#   2. Secret path: nginx returns 404 for any URL not containing
+#      PROXY_SECRET_PATH, preventing scanners from identifying the service.
 #
-#        Traffic flow:
-#          Gemini → Cloud Run (nginx, --ingress=all)
-#                     │  secret path gate (404 on wrong path)
-#                     ▼
-#                   Cloud NAT → Static IP → Snowflake
-#
-#   B  — Cloud Armor + Global LB only (network layer)
-#        Cloud Armor blocks all non-GCP source IPs at the LB edge.
-#        Cloud Run ingress locked to LB — direct URL not publicly reachable.
-#        Requires Cloud Armor Enterprise subscription.
-#
-#        Traffic flow:
-#          Gemini → Cloud Armor → Global HTTPS LB → Cloud Run (open proxy)
-#                                                      │  --ingress=internal-and-cloud-load-balancing
-#                                                      ▼
-#                                                    Cloud NAT → Static IP → Snowflake
-#
-#   AB — Both layers (recommended — defence-in-depth)
-#        Cloud Armor filters at the network edge; secret path filters at
-#        the application layer. Two independent gates must both be bypassed.
-#
-#        Traffic flow:
-#          Gemini → Cloud Armor → Global HTTPS LB → Cloud Run (nginx, secret path gate)
-#                                                      │  --ingress=internal-and-cloud-load-balancing
-#                                                      ▼
-#                                                    Cloud NAT → Static IP → Snowflake
-#
-# Gemini Enterprise connector endpoint URL (printed at end of script):
-#   A only:  https://<cloud-run-url>/<PROXY_SECRET_PATH>/
-#   B only:  https://<LB_DOMAIN>/
-#   AB:      https://<LB_DOMAIN>/<PROXY_SECRET_PATH>/
+# Gemini Enterprise connector settings (printed at end of script):
+#   Endpoint URL: https://<LB_DOMAIN>/<PROXY_SECRET_PATH>/
 #
 # Prerequisites:
 #   - gcloud CLI authenticated (gcloud auth login)
 #   - Docker not required — image is built in the cloud via Cloud Build
 #   - .env file populated (copy from .env.example), including:
-#       HARDENING_MODE     — A, B, or AB (default AB)
-#       PROXY_SECRET_PATH  — required for mode A or AB; openssl rand -hex 16
-#       LB_DOMAIN          — required for mode B or AB; domain you control
+#       PROXY_SECRET_PATH  — generate with: openssl rand -hex 16
+#       LB_DOMAIN          — domain name you control (e.g. proxy.yourdomain.com)
+#                            point its DNS A record at the LB IP printed below
 #
 # Usage:
 #   bash deploy/setup_psc_proxy.sh
@@ -78,20 +69,6 @@ fi
 # shellcheck disable=SC1090
 set -a; source "${ENV_FILE}"; set +a
 
-# ── Validate HARDENING_MODE and set mode flags ─────────────────────────────────
-HARDENING_MODE="${HARDENING_MODE:-AB}"
-case "${HARDENING_MODE}" in
-  A)  _USE_SECRET_PATH=true;  _USE_CLOUD_ARMOR=false ;;
-  B)  _USE_SECRET_PATH=false; _USE_CLOUD_ARMOR=true  ;;
-  AB) _USE_SECRET_PATH=true;  _USE_CLOUD_ARMOR=true  ;;
-  *)
-    echo "ERROR: HARDENING_MODE must be A, B, or AB (got: '${HARDENING_MODE}')" >&2
-    echo "       Set HARDENING_MODE in .env or unset it to use the default (AB)." >&2
-    exit 1
-    ;;
-esac
-
-# ── Validate required .env variables ──────────────────────────────────────────
 : "${PROJECT_ID:?PROJECT_ID must be set in .env}"
 : "${REGION:?REGION must be set in .env}"
 : "${VPC_NETWORK:?VPC_NETWORK must be set in .env}"
@@ -104,18 +81,12 @@ esac
 : "${VPC_CONNECTOR_SUBNET:?VPC_CONNECTOR_SUBNET must be set in .env}"
 : "${CLOUD_RUN_SERVICE_NAME:?CLOUD_RUN_SERVICE_NAME must be set in .env}"
 : "${AR_REPO:?AR_REPO must be set in .env}"
-
-if [[ "${_USE_SECRET_PATH}" == "true" ]]; then
-  : "${PROXY_SECRET_PATH:?PROXY_SECRET_PATH must be set when HARDENING_MODE is A or AB — run: openssl rand -hex 16}"
-fi
-if [[ "${_USE_CLOUD_ARMOR}" == "true" ]]; then
-  : "${LB_DOMAIN:?LB_DOMAIN must be set when HARDENING_MODE is B or AB — domain name that will front the Global LB}"
-fi
+: "${PROXY_SECRET_PATH:?PROXY_SECRET_PATH must be set in .env — run: openssl rand -hex 16}"
+: "${LB_DOMAIN:?LB_DOMAIN must be set in .env — domain name that will front the Global LB}"
 # ──────────────────────────────────────────────────────────────────────────────
 
 _IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/proxy:latest"
 _PROXY_DIR="${SCRIPT_DIR}/../proxy"
-_LB_IP=""
 
 echo ""
 echo "=== Snowflake Connector Proxy Setup (Cloud Run) ==="
@@ -124,10 +95,7 @@ echo "  Region:         ${REGION}"
 echo "  VPC:            ${VPC_NETWORK} (connector subnet: ${VPC_CONNECTOR_SUBNET})"
 echo "  Snowflake host: ${SNOWFLAKE_HOST}:${SNOWFLAKE_PORT}"
 echo "  Image:          ${_IMAGE}"
-echo "  Hardening mode: ${HARDENING_MODE}"
-if [[ "${_USE_CLOUD_ARMOR}" == "true" ]]; then
-  echo "  LB domain:      ${LB_DOMAIN}"
-fi
+echo "  LB domain:      ${LB_DOMAIN}"
 echo ""
 
 # ── Step 1: Enable required APIs ─────────────────────────────────────────────
@@ -251,51 +219,31 @@ fi
 # --vpc-egress=all-traffic: forces ALL outbound traffic through the VPC
 #   connector and therefore through Cloud NAT — without this only RFC-1918
 #   traffic uses the connector and Snowflake would see a dynamic Google IP.
-#
-# --ingress behaviour depends on HARDENING_MODE:
-#   A  — ingress=all: Cloud Run URL is publicly reachable; security comes from
-#        the nginx secret path gate (404 for any path not matching PROXY_SECRET_PATH).
-#   B/AB — ingress=internal-and-cloud-load-balancing: raw Cloud Run URL is not
-#        reachable from the public internet; all traffic must pass through the
-#        Global LB and Cloud Armor (Steps 9-14).
-#
-# PROXY_SECRET_PATH is injected as an env var only when Strategy A is active;
-# entrypoint.sh selects the appropriate nginx config template based on whether
-# the variable is set.
+# --ingress=internal-and-cloud-load-balancing: the raw Cloud Run URL is not
+#   reachable from the public internet; only the Global LB (Step 13) can reach
+#   it, so Cloud Armor (Step 14) is the mandatory entry point.
+# PROXY_SECRET_PATH is injected as an env var and substituted into the nginx
+#   config at container startup — nginx returns 404 for paths not matching it.
 echo ""
 echo "=== Step 8: Deploying Cloud Run service ==="
-
-_ENVVARS="SNOWFLAKE_HOST=${SNOWFLAKE_HOST},SNOWFLAKE_PORT=${SNOWFLAKE_PORT}"
-if [[ "${_USE_CLOUD_ARMOR}" == "true" ]]; then
-  _INGRESS="internal-and-cloud-load-balancing"
-else
-  _INGRESS="all"
-fi
-if [[ "${_USE_SECRET_PATH}" == "true" ]]; then
-  _ENVVARS="${_ENVVARS},PROXY_SECRET_PATH=${PROXY_SECRET_PATH}"
-fi
-
 gcloud run deploy "${CLOUD_RUN_SERVICE_NAME}" \
     --image="${_IMAGE}" \
     --region="${REGION}" \
     --project="${PROJECT_ID}" \
     --vpc-connector="${VPC_CONNECTOR_NAME}" \
     --vpc-egress=all-traffic \
-    --set-env-vars="${_ENVVARS}" \
+    --set-env-vars="SNOWFLAKE_HOST=${SNOWFLAKE_HOST},SNOWFLAKE_PORT=${SNOWFLAKE_PORT},PROXY_SECRET_PATH=${PROXY_SECRET_PATH}" \
     --port=8080 \
     --cpu=1 \
     --memory=512Mi \
     --max-instances=3 \
-    --ingress="${_INGRESS}" \
+    --ingress=internal-and-cloud-load-balancing \
     --allow-unauthenticated
-echo "  Deployed: ${CLOUD_RUN_SERVICE_NAME} (ingress: ${_INGRESS})"
+echo "  Deployed: ${CLOUD_RUN_SERVICE_NAME}"
 
 _RUN_URL=$(gcloud run services describe "${CLOUD_RUN_SERVICE_NAME}" \
     --region="${REGION}" --project="${PROJECT_ID}" \
     --format="value(status.url)")
-
-# ── Steps 9–14: Cloud Armor + Global LB (Strategy B / AB only) ───────────────
-if [[ "${_USE_CLOUD_ARMOR}" == "true" ]]; then
 
 # ── Step 9: Global static IP for the Load Balancer ───────────────────────────
 # Must be --global (not regional) — Global HTTPS Load Balancers require a
@@ -438,70 +386,34 @@ else
   echo "  Already exists: ${CLOUD_RUN_SERVICE_NAME}-armor"
 fi
 
-fi  # end if _USE_CLOUD_ARMOR
-
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
 echo "╔══════════════════════════════════════════════════════════════════════╗"
 echo "║               Snowflake Proxy Setup Complete                        ║"
 echo "╠══════════════════════════════════════════════════════════════════════╣"
 echo "║"
-echo "║  Hardening mode: ${HARDENING_MODE}"
-echo "║"
 echo "║  Static outbound IP (allowlist in Snowflake):"
 echo "║    ${NAT_IP_ADDRESS}"
 echo "║"
-
-if [[ "${_USE_CLOUD_ARMOR}" == "true" ]]; then
-  echo "║  Point your DNS A record:"
-  echo "║    ${LB_DOMAIN}  →  ${_LB_IP}"
-  echo "║"
-fi
-
-echo "║  In Gemini Enterprise → connector configuration:"
-if [[ "${_USE_CLOUD_ARMOR}" == "true" && "${_USE_SECRET_PATH}" == "true" ]]; then
-  echo "║    Endpoint URL: https://${LB_DOMAIN}/${PROXY_SECRET_PATH}/"
-elif [[ "${_USE_CLOUD_ARMOR}" == "true" ]]; then
-  echo "║    Endpoint URL: https://${LB_DOMAIN}/"
-elif [[ "${_USE_SECRET_PATH}" == "true" ]]; then
-  echo "║    Endpoint URL: ${_RUN_URL}/${PROXY_SECRET_PATH}/"
-else
-  echo "║    Endpoint URL: ${_RUN_URL}/"
-fi
+echo "║  Point your DNS A record:"
+echo "║    ${LB_DOMAIN}  →  ${_LB_IP}"
 echo "║"
-
-if [[ "${_USE_CLOUD_ARMOR}" == "true" ]]; then
-  echo "║  Direct Cloud Run URL is ingress-restricted (not publicly reachable)."
-  echo "║  Cloud Armor blocks all non-Google-Cloud source IPs."
-  echo "║"
-fi
-
+echo "║  In Gemini Enterprise → connector configuration:"
+echo "║    Endpoint URL: https://${LB_DOMAIN}/${PROXY_SECRET_PATH}/"
+echo "║"
+echo "║  Direct Cloud Run URL is now ingress-restricted (not publicly reachable)."
+echo "║  Cloud Armor blocks all non-Google-Cloud source IPs."
+echo "║"
 echo "╚══════════════════════════════════════════════════════════════════════╝"
 echo ""
 echo "  Snowflake — run to allowlist the static egress IP:"
 echo "    ALTER NETWORK POLICY <your_policy_name>"
 echo "      ADD ALLOWED_IP_LIST = ('${NAT_IP_ADDRESS}/32');"
 echo ""
-
-if [[ "${_USE_CLOUD_ARMOR}" == "true" && "${_USE_SECRET_PATH}" == "true" ]]; then
-  echo "  Verify the proxy is forwarding correctly:"
-  echo "    curl -si https://${LB_DOMAIN}/${PROXY_SECRET_PATH}/api/v2/mcp/sse \\"
-  echo "        -H 'Authorization: Bearer <token>' | head -5"
-  echo ""
-  echo "  Verify secret path gate (expect 404):"
-  echo "    curl -si https://${LB_DOMAIN}/anything | head -5"
-  echo ""
-elif [[ "${_USE_CLOUD_ARMOR}" == "true" ]]; then
-  echo "  Verify the proxy is forwarding correctly:"
-  echo "    curl -si https://${LB_DOMAIN}/api/v2/mcp/sse \\"
-  echo "        -H 'Authorization: Bearer <token>' | head -5"
-  echo ""
-elif [[ "${_USE_SECRET_PATH}" == "true" ]]; then
-  echo "  Verify the proxy is forwarding correctly:"
-  echo "    curl -si ${_RUN_URL}/${PROXY_SECRET_PATH}/api/v2/mcp/sse \\"
-  echo "        -H 'Authorization: Bearer <token>' | head -5"
-  echo ""
-  echo "  Verify secret path gate (expect 404):"
-  echo "    curl -si ${_RUN_URL}/anything | head -5"
-  echo ""
-fi
+echo "  Verify the proxy is forwarding correctly:"
+echo "    curl -si https://${LB_DOMAIN}/${PROXY_SECRET_PATH}/api/v2/mcp/sse \\"
+echo "        -H 'Authorization: Bearer <token>' | head -5"
+echo ""
+echo "  Verify secret path gate (expect 404):"
+echo "    curl -si https://${LB_DOMAIN}/anything | head -5"
+echo ""
