@@ -29,6 +29,9 @@ SUCCESS_BG = colors.HexColor("#e8f5e9")
 SUCCESS_LINE = colors.HexColor("#2e7d32")
 RED        = colors.HexColor("#c62828")
 STEP_BG    = colors.HexColor("#e3f2fd")
+MODE_A_BG  = colors.HexColor("#e8f5e9")
+MODE_B_BG  = colors.HexColor("#e3f2fd")
+MODE_AB_BG = colors.HexColor("#fce4ec")
 
 W, H = A4
 
@@ -92,6 +95,9 @@ def note_box(text, bg=WARN_BG, line=WARN_LINE, label="NOTE"):
 def success_box(text):
     return note_box(text, bg=SUCCESS_BG, line=SUCCESS_LINE, label="OUTPUT")
 
+def mode_badge(modes_text, bg=STEP_BG, line=BLUE):
+    return note_box(modes_text, bg=bg, line=line, label="APPLIES TO")
+
 def step_box(number, title, body_elements):
     header_data = [[
         Paragraph(f"<b>Step {number}</b>", style("sn","Normal",fontSize=10,
@@ -130,13 +136,10 @@ def kv_table(rows, col_widths=None):
 # ── Page callbacks ─────────────────────────────────────────────────────────────
 def on_first_page(canvas, doc):
     canvas.saveState()
-    # Full-bleed header band
     canvas.setFillColor(DARK_BLUE)
     canvas.rect(0, H - 10*cm, W, 10*cm, fill=1, stroke=0)
-    # Accent stripe
     canvas.setFillColor(BLUE)
     canvas.rect(0, H - 10*cm, W, 0.4*cm, fill=1, stroke=0)
-    # Footer
     canvas.setFillColor(GREY_LINE)
     canvas.rect(0, 0, W, 1.2*cm, fill=1, stroke=0)
     canvas.setFont("Helvetica", 8)
@@ -177,7 +180,7 @@ story += [
     Spacer(1, 0.3*cm),
     Paragraph("Step-by-step provisioning guide for GCP infrastructure", S["title_sub"]),
     Spacer(1, 1.2*cm),
-    Paragraph(f"Version 1.0 &nbsp;&nbsp;|&nbsp;&nbsp; {date.today().strftime('%B %d, %Y')} &nbsp;&nbsp;|&nbsp;&nbsp; igbokwe", S["title_meta"]),
+    Paragraph(f"Version 2.0 &nbsp;&nbsp;|&nbsp;&nbsp; {date.today().strftime('%B %d, %Y')} &nbsp;&nbsp;|&nbsp;&nbsp; igbokwe", S["title_meta"]),
     PageBreak(),
 ]
 
@@ -189,30 +192,32 @@ story += [
 ]
 toc_entries = [
     ("1", "Overview & Architecture"),
+    ("  1.1", "Hardening Mode Comparison"),
+    ("  1.2", "Architecture Diagrams"),
     ("2", "Prerequisites"),
     ("3", "Configuration Variables (.env)"),
     ("4", "Proxy Source Files"),
-    ("5", "Provisioning Steps (Steps 1 – 14)"),
-    ("  5.1", "Step 1  — Enable GCP APIs"),
-    ("  5.2", "Step 2  — Reserve Regional Static IP (Egress)"),
-    ("  5.3", "Step 3  — Cloud Router"),
-    ("  5.4", "Step 4  — Cloud NAT"),
-    ("  5.5", "Step 5  — Artifact Registry Repository"),
-    ("  5.6", "Step 6  — Build & Push Docker Image"),
-    ("  5.7", "Step 7  — Serverless VPC Access Connector"),
-    ("  5.8", "Step 8  — Deploy Cloud Run Service"),
-    ("  5.9", "Step 9  — Reserve Global Static IP (Load Balancer)"),
-    ("  5.10","Step 10 — Google-Managed SSL Certificate"),
-    ("  5.11","Step 11 — Serverless Network Endpoint Group (NEG)"),
-    ("  5.12","Step 12 — Global Backend Service"),
-    ("  5.13","Step 13 — Global HTTPS Load Balancer"),
-    ("  5.14","Step 14 — Cloud Armor Security Policy"),
+    ("5", "Provisioning Steps"),
+    ("  5.1", "Step 1  — Enable GCP APIs  [All modes]"),
+    ("  5.2", "Step 2  — Reserve Regional Static IP (Egress)  [All modes]"),
+    ("  5.3", "Step 3  — Cloud Router  [All modes]"),
+    ("  5.4", "Step 4  — Cloud NAT  [All modes]"),
+    ("  5.5", "Step 5  — Artifact Registry Repository  [All modes]"),
+    ("  5.6", "Step 6  — Build & Push Docker Image  [All modes]"),
+    ("  5.7", "Step 7  — Serverless VPC Access Connector  [All modes]"),
+    ("  5.8", "Step 8  — Deploy Cloud Run Service  [All modes]"),
+    ("  5.9", "Step 9  — Reserve Global Static IP (Load Balancer)  [B / AB]"),
+    ("  5.10","Step 10 — Google-Managed SSL Certificate  [B / AB]"),
+    ("  5.11","Step 11 — Serverless Network Endpoint Group (NEG)  [B / AB]"),
+    ("  5.12","Step 12 — Global Backend Service  [B / AB]"),
+    ("  5.13","Step 13 — Global HTTPS Load Balancer  [B / AB]"),
+    ("  5.14","Step 14 — Cloud Armor Security Policy  [B / AB]"),
     ("6", "Post-Provisioning Configuration"),
-    ("  6.1", "DNS A Record"),
-    ("  6.2", "Snowflake Network Policy"),
-    ("  6.3", "Gemini Enterprise Connector"),
+    ("  6.1", "DNS A Record  [B / AB]"),
+    ("  6.2", "Snowflake Network Policy  [All modes]"),
+    ("  6.3", "Gemini Enterprise Connector  [All modes]"),
     ("7", "Verification"),
-    ("8", "Secret Rotation"),
+    ("8", "Secret Rotation  [A / AB]"),
     ("9", "Resources Provisioned — Summary Table"),
 ]
 toc_data = [[Paragraph(f"<b>{n}</b>", S["note"]), Paragraph(t, S["note"])] for n, t in toc_entries]
@@ -243,24 +248,65 @@ story += [
         "Snowflake account that enforces network policies.",
         S["body"]),
     Spacer(1, 0.3*cm),
-    Paragraph("Solution Architecture", S["h3"]),
+    Paragraph("1.1  Hardening Mode Comparison", S["h2"]),
+    Paragraph(
+        "Set <b>HARDENING_MODE</b> in your <b>.env</b> file to control which security layers are deployed. "
+        "The three modes are independent and can be combined or used separately.",
+        S["body"]),
+    Spacer(1, 0.2*cm),
 ]
 
-arch = """\
+mode_rows = [
+    ["Mode", "Security Layer", "How it works", "Requirements", "Cost impact"],
+    ["A\n(secret path)", "Application layer\n(nginx)",
+     "nginx returns HTTP 404 for any URL not containing PROXY_SECRET_PATH. "
+     "The secret is stripped before forwarding to Snowflake. "
+     "Cloud Run URL is publicly reachable.",
+     "None beyond core infra",
+     "No additional cost"],
+    ["B\n(Cloud Armor)", "Network layer\n(LB edge)",
+     "Cloud Armor policy blocks all non-GCP source IPs at the Global LB edge "
+     "with HTTP 403. Cloud Run ingress locked to LB — direct URL not reachable. "
+     "nginx serves an open proxy.",
+     "Cloud Armor Enterprise\nenrollment.\nDomain name for LB.",
+     "~$20–40/month\n+ Enterprise subscription"],
+    ["AB\n(recommended)", "Both layers\n(defence-in-depth)",
+     "Cloud Armor filters at the network edge; secret path filters at the "
+     "application layer. Two independent gates must both be bypassed.",
+     "Cloud Armor Enterprise\nenrollment.\nDomain name for LB.",
+     "~$20–40/month\n+ Enterprise subscription"],
+]
+mt = Table(mode_rows, colWidths=[1.8*cm, 2.4*cm, 5.5*cm, 3.2*cm, 2.5*cm])
+mt.setStyle(TableStyle([
+    ("BACKGROUND", (0,0), (-1,0), DARK_BLUE),
+    ("TEXTCOLOR", (0,0), (-1,0), colors.white),
+    ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+    ("FONTSIZE", (0,0), (-1,-1), 7.5),
+    ("GRID", (0,0), (-1,-1), 0.4, GREY_LINE),
+    ("LEFTPADDING", (0,0), (-1,-1), 6),
+    ("TOPPADDING", (0,0), (-1,-1), 4),
+    ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+    ("VALIGN", (0,0), (-1,-1), "TOP"),
+    ("BACKGROUND", (0,1), (-1,1), MODE_A_BG),
+    ("BACKGROUND", (0,2), (-1,2), MODE_B_BG),
+    ("BACKGROUND", (0,3), (-1,3), MODE_AB_BG),
+    ("FONTNAME", (0,1), (0,-1), "Helvetica-Bold"),
+]))
+story += [mt, Spacer(1, 0.4*cm)]
+
+story += [
+    Paragraph("1.2  Architecture Diagrams", S["h2"]),
+    Paragraph("<b>Strategy A — Secret path gate only</b>", S["h3"]),
+]
+
+arch_a = """\
   Gemini Enterprise connector
-      │  HTTPS  →  https://<LB_DOMAIN>/<PROXY_SECRET_PATH>/
+      │  HTTPS  →  https://<cloud-run-url>/<PROXY_SECRET_PATH>/
       ▼
-  Cloud Armor  [SECURITY LAYER 1]
-      • evaluateThreatIntelligence('iplist-public-clouds-gcp')
-      • Blocks all non-GCP source IPs with HTTP 403
-      ▼
-  Global HTTPS Load Balancer  (port 443, TLS termination)
-      │  →  Serverless NEG
-      ▼
-  Cloud Run  (nginx container)  [SECURITY LAYER 2]
+  Cloud Run  (nginx container)
+      • --ingress=all (direct Cloud Run URL publicly accessible)
       • Secret path gate: 404 for any path ≠ /<PROXY_SECRET_PATH>/
       • Rewrites Host header to Snowflake hostname
-      • --ingress=internal-and-cloud-load-balancing (direct URL blocked)
       • --vpc-egress=all-traffic
       ▼
   Serverless VPC Access Connector
@@ -270,25 +316,69 @@ arch = """\
   Snowflake  (account.snowflakecomputing.com:443)"""
 
 story += [
-    code_block(arch),
+    code_block(arch_a),
     Spacer(1, 0.3*cm),
-    Paragraph("Security Layers", S["h3"]),
-    Paragraph(
-        "<b>Layer 1 — Cloud Armor (network):</b> Attached to the Global LB backend. "
-        "Uses the Google Threat Intelligence feed <i>iplist-public-clouds-gcp</i> to allow "
-        "only GCP source IPs. All other traffic is denied with HTTP 403 before reaching "
-        "Cloud Run. Requires Cloud Armor Enterprise subscription.",
-        S["bullet"]),
-    Paragraph(
-        "<b>Layer 2 — Secret path (application):</b> nginx returns HTTP 404 for any URL "
-        "that does not begin with the randomly generated <i>PROXY_SECRET_PATH</i> segment. "
-        "The secret is stripped before the request is forwarded to Snowflake.",
-        S["bullet"]),
+    Paragraph("<b>Strategy B — Cloud Armor + Global LB only</b>", S["h3"]),
+]
+
+arch_b = """\
+  Gemini Enterprise connector
+      │  HTTPS  →  https://<LB_DOMAIN>/
+      ▼
+  Cloud Armor  [SECURITY LAYER — network]
+      • evaluateThreatIntelligence('iplist-public-clouds-gcp')
+      • Blocks all non-GCP source IPs with HTTP 403
+      ▼
+  Global HTTPS Load Balancer  (port 443, TLS termination)
+      │  →  Serverless NEG
+      ▼
+  Cloud Run  (nginx container — open proxy)
+      • --ingress=internal-and-cloud-load-balancing (direct URL blocked)
+      • Rewrites Host header to Snowflake hostname
+      • --vpc-egress=all-traffic
+      ▼
+  Serverless VPC Access Connector
+      ▼
+  Cloud NAT  →  Static External IP  ←── allowlisted in Snowflake
+      ▼
+  Snowflake  (account.snowflakecomputing.com:443)"""
+
+story += [
+    code_block(arch_b),
     Spacer(1, 0.3*cm),
+    Paragraph("<b>Strategy A+B — Full hardening (recommended)</b>", S["h3"]),
+]
+
+arch_ab = """\
+  Gemini Enterprise connector
+      │  HTTPS  →  https://<LB_DOMAIN>/<PROXY_SECRET_PATH>/
+      ▼
+  Cloud Armor  [SECURITY LAYER 1 — network]
+      • evaluateThreatIntelligence('iplist-public-clouds-gcp')
+      • Blocks all non-GCP source IPs with HTTP 403
+      ▼
+  Global HTTPS Load Balancer  (port 443, TLS termination)
+      │  →  Serverless NEG
+      ▼
+  Cloud Run  (nginx container)  [SECURITY LAYER 2 — application]
+      • --ingress=internal-and-cloud-load-balancing (direct URL blocked)
+      • Secret path gate: 404 for any path ≠ /<PROXY_SECRET_PATH>/
+      • Rewrites Host header to Snowflake hostname
+      • --vpc-egress=all-traffic
+      ▼
+  Serverless VPC Access Connector
+      ▼
+  Cloud NAT  →  Static External IP  ←── allowlisted in Snowflake
+      ▼
+  Snowflake  (account.snowflakecomputing.com:443)"""
+
+story += [
+    code_block(arch_ab),
     note_box(
-        "Cloud Run ingress is set to <i>internal-and-cloud-load-balancing</i>. "
+        "For Strategy A+B: Cloud Run ingress is set to internal-and-cloud-load-balancing. "
         "The raw Cloud Run URL is not publicly reachable — all traffic must pass through "
-        "the Global LB and Cloud Armor.", bg=STEP_BG, line=BLUE, label="IMPORTANT"),
+        "the Global LB and Cloud Armor.",
+        bg=STEP_BG, line=BLUE, label="IMPORTANT"),
     PageBreak(),
 ]
 
@@ -305,14 +395,14 @@ prereqs = [
     ["gcloud CLI", "Installed and authenticated: gcloud auth login"],
     ["VPC Network", "An existing VPC network in the target region."],
     ["Dedicated /28 subnet", "A subnet used exclusively by the VPC connector — no other resources. Required so Cloud NAT can scope egress by subnet name."],
-    ["Domain name", "A domain (or subdomain) you control for LB_DOMAIN. You must be able to create an A record pointing to the LB IP."],
-    ["Cloud Armor Enterprise", "Enrolled at the project level. Required for evaluateThreatIntelligence() expressions."],
+    ["Domain name [B/AB]", "A domain (or subdomain) you control for LB_DOMAIN. You must be able to create an A record pointing to the LB IP. Not required for Strategy A."],
+    ["Cloud Armor Enterprise [B/AB]", "Enrolled at the project level. Required for evaluateThreatIntelligence() expressions. Not required for Strategy A."],
     ["Docker", "Not required — the proxy image is built in the cloud via Cloud Build."],
     ["Snowflake access", "Admin rights to modify the Snowflake network policy."],
 ]
 story += [
     kv_table([[Paragraph(f"<b>{k}</b>", S["note"]), Paragraph(v, S["note"])] for k,v in prereqs],
-             col_widths=[4.5*cm, W - 9.0*cm]),
+             col_widths=[4.8*cm, W - 9.3*cm]),
     Spacer(1, 0.4*cm),
     Paragraph("Required IAM Roles (minimum)", S["h3"]),
 ]
@@ -345,7 +435,8 @@ story += [
     hr(),
     Paragraph(
         "Copy <b>.env.example</b> to <b>.env</b> in the repository root and fill in all values "
-        "before running the provisioning script. The script will fail fast if any variable is missing.",
+        "before running the provisioning script. The script will fail fast if any required "
+        "variable is missing for the selected HARDENING_MODE.",
         S["body"]),
     Spacer(1, 0.2*cm),
     code_block("cp .env.example .env"),
@@ -353,28 +444,29 @@ story += [
 ]
 
 env_vars = [
-    ["Variable", "Example / How to set", "Description"],
-    ["PROJECT_ID", "igbokwe", "GCP project ID"],
-    ["REGION", "us-central1", "GCP region for all regional resources"],
-    ["VPC_NETWORK", "default", "Name of the existing VPC network"],
-    ["SNOWFLAKE_HOST", "xy12345.snowflakecomputing.com", "Snowflake account hostname"],
-    ["SNOWFLAKE_PORT", "443", "Snowflake HTTPS port (always 443)"],
-    ["NAT_IP_NAME", "snowflake-proxy-nat-ip", "Name for the reserved regional egress IP"],
-    ["NAT_ROUTER_NAME", "snowflake-router", "Name for the Cloud Router"],
-    ["NAT_GATEWAY_NAME", "snowflake-nat", "Name for the Cloud NAT gateway"],
-    ["VPC_CONNECTOR_NAME", "snowflake-connector", "Name for the VPC Access Connector"],
-    ["VPC_CONNECTOR_SUBNET", "snowflake-connector-subnet", "Dedicated /28 subnet name (no other resources)"],
-    ["CLOUD_RUN_SERVICE_NAME", "snowflake-proxy", "Cloud Run service name"],
-    ["AR_REPO", "snowflake-proxy", "Artifact Registry Docker repository name"],
-    ["PROXY_SECRET_PATH", "openssl rand -hex 16", "Random hex secret embedded in the URL path"],
-    ["LB_DOMAIN", "proxy.yourdomain.com", "Domain name for the Global LB (you must control DNS)"],
+    ["Variable", "Example / How to set", "Description", "Mode"],
+    ["PROJECT_ID", "my-project-id", "GCP project ID", "All"],
+    ["REGION", "us-central1", "GCP region for all regional resources", "All"],
+    ["VPC_NETWORK", "default", "Name of the existing VPC network", "All"],
+    ["SNOWFLAKE_HOST", "xy12345.snowflakecomputing.com", "Snowflake account hostname", "All"],
+    ["SNOWFLAKE_PORT", "443", "Snowflake HTTPS port (always 443)", "All"],
+    ["NAT_IP_NAME", "snowflake-proxy-nat-ip", "Name for the reserved regional egress IP", "All"],
+    ["NAT_ROUTER_NAME", "snowflake-router", "Name for the Cloud Router", "All"],
+    ["NAT_GATEWAY_NAME", "snowflake-nat", "Name for the Cloud NAT gateway", "All"],
+    ["VPC_CONNECTOR_NAME", "snowflake-connector", "Name for the VPC Access Connector", "All"],
+    ["VPC_CONNECTOR_SUBNET", "snowflake-connector-subnet", "Dedicated /28 subnet name", "All"],
+    ["CLOUD_RUN_SERVICE_NAME", "snowflake-proxy", "Cloud Run service name", "All"],
+    ["AR_REPO", "snowflake-proxy", "Artifact Registry Docker repository name", "All"],
+    ["HARDENING_MODE", "AB", "Which security layers to deploy: A, B, or AB (default AB)", "All"],
+    ["PROXY_SECRET_PATH", "openssl rand -hex 16", "Random hex secret in the URL path. Required for A or AB.", "A / AB"],
+    ["LB_DOMAIN", "proxy.yourdomain.com", "Domain for the Global LB. Required for B or AB.", "B / AB"],
 ]
-et = Table(env_vars, colWidths=[4.5*cm, 4.8*cm, W - 13.4*cm])
+et = Table(env_vars, colWidths=[4.2*cm, 4.2*cm, W - 14.0*cm, 1.5*cm])
 et.setStyle(TableStyle([
     ("BACKGROUND", (0,0), (-1,0), DARK_BLUE),
     ("TEXTCOLOR", (0,0), (-1,0), colors.white),
     ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
-    ("FONTSIZE", (0,0), (-1,-1), 8),
+    ("FONTSIZE", (0,0), (-1,-1), 7.8),
     ("GRID", (0,0), (-1,-1), 0.4, GREY_LINE),
     ("LEFTPADDING", (0,0), (-1,-1), 6),
     ("TOPPADDING", (0,0), (-1,-1), 4),
@@ -383,7 +475,7 @@ et.setStyle(TableStyle([
     ("ROWBACKGROUNDS", (0,1), (-1,-1), [GREY_BG, colors.white]),
     ("FONTNAME", (0,1), (0,-1), "Courier"),
     ("FONTNAME", (1,1), (1,-1), "Courier"),
-    ("FONTSIZE", (0,1), (1,-1), 7.5),
+    ("FONTSIZE", (0,1), (1,-1), 7.2),
 ]))
 story += [
     et,
@@ -399,23 +491,34 @@ story += [
     Paragraph("4. Proxy Source Files", S["h1"]),
     hr(),
     Paragraph(
-        "The repository contains three files that make up the nginx proxy container. "
-        "These are built into a Docker image by Cloud Build in Step 6.",
+        "The repository contains four files that make up the nginx proxy container. "
+        "These are built into a Docker image by Cloud Build in Step 6. "
+        "The entrypoint script selects the correct nginx config template at container "
+        "startup based on whether PROXY_SECRET_PATH is set.",
         S["body"]),
     Spacer(1, 0.2*cm),
 ]
 files = [
-    ["File", "Purpose"],
-    ["proxy/Dockerfile", "Builds nginx:alpine with CA certificates and envsubst (gettext). Exposes port 8080."],
-    ["proxy/entrypoint.sh", "Runs envsubst to substitute SNOWFLAKE_HOST, SNOWFLAKE_PORT, and PROXY_SECRET_PATH into the nginx config template at container startup, then starts nginx."],
-    ["proxy/nginx.conf.template", "nginx reverse proxy config. Defines two location blocks: one for the secret path (strips prefix, proxies to Snowflake with TLS verification and SSE support) and a catch-all that returns 404."],
+    ["File", "Purpose", "Used when"],
+    ["proxy/Dockerfile",
+     "Builds nginx:alpine with CA certificates and envsubst (gettext). Copies both nginx config templates. Exposes port 8080.",
+     "Always"],
+    ["proxy/entrypoint.sh",
+     "Checks whether PROXY_SECRET_PATH is set. If set, substitutes SNOWFLAKE_HOST, SNOWFLAKE_PORT, and PROXY_SECRET_PATH into the secret-path template. If not set, substitutes SNOWFLAKE_HOST and SNOWFLAKE_PORT into the open template. Then starts nginx.",
+     "Always (selects template at runtime)"],
+    ["proxy/nginx.conf.template",
+     "nginx config with two location blocks: one for the secret path prefix (strips prefix, proxies to Snowflake with TLS verification and SSE support) and a catch-all that returns 404.",
+     "Strategy A or AB\n(PROXY_SECRET_PATH is set)"],
+    ["proxy/nginx.conf.open.template",
+     "Simple open proxy nginx config. All requests are forwarded directly to Snowflake with no path filtering. Security relies entirely on Cloud Armor (Strategy B).",
+     "Strategy B only\n(PROXY_SECRET_PATH is not set)"],
 ]
-ft = Table(files, colWidths=[5.5*cm, W - 9.9*cm])
+ft = Table(files, colWidths=[4.5*cm, W - 10.5*cm, 2.5*cm])
 ft.setStyle(TableStyle([
     ("BACKGROUND", (0,0), (-1,0), DARK_BLUE),
     ("TEXTCOLOR", (0,0), (-1,0), colors.white),
     ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
-    ("FONTSIZE", (0,0), (-1,-1), 8.5),
+    ("FONTSIZE", (0,0), (-1,-1), 8),
     ("GRID", (0,0), (-1,-1), 0.4, GREY_LINE),
     ("LEFTPADDING", (0,0), (-1,-1), 7),
     ("TOPPADDING", (0,0), (-1,-1), 4),
@@ -423,7 +526,7 @@ ft.setStyle(TableStyle([
     ("VALIGN", (0,0), (-1,-1), "TOP"),
     ("ROWBACKGROUNDS", (0,1), (-1,-1), [GREY_BG, colors.white]),
     ("FONTNAME", (0,1), (0,-1), "Courier"),
-    ("FONTSIZE", (0,1), (0,-1), 8),
+    ("FONTSIZE", (0,1), (0,-1), 7.5),
 ]))
 story += [ft, PageBreak()]
 
@@ -433,14 +536,14 @@ story += [
     hr(),
     Paragraph(
         "Execute steps in the order shown. Each step is idempotent — if a resource already "
-        "exists the command will detect it and skip creation. All gcloud commands target "
-        "the project and region defined in your .env file.",
+        "exists the command will detect it and skip creation. Steps marked <b>[B / AB]</b> "
+        "are only required when HARDENING_MODE is B or AB; skip them for Strategy A.",
         S["body"]),
     Spacer(1, 0.3*cm),
 ]
 
 # ── Step 1 ────────────────────────────────────────────────────────────────────
-story += step_box("1", "Enable Required GCP APIs", [
+story += step_box("1", "Enable Required GCP APIs  [All modes]", [
     Paragraph(
         "Enable all GCP service APIs used by this solution. Safe to re-run — "
         "enabling an already-enabled API is a no-op.",
@@ -465,7 +568,7 @@ gcloud services enable \\
 ])
 
 # ── Step 2 ────────────────────────────────────────────────────────────────────
-story += step_box("2", "Reserve Regional Static IP (Egress)", [
+story += step_box("2", "Reserve Regional Static IP (Egress)  [All modes]", [
     Paragraph(
         "Reserve a <b>regional</b> static external IP address. This is the IP that "
         "Snowflake's network policy will allowlist. It must be regional — Cloud NAT "
@@ -486,7 +589,7 @@ gcloud compute addresses describe <NAT_IP_NAME> \\
 ])
 
 # ── Step 3 ────────────────────────────────────────────────────────────────────
-story += step_box("3", "Create Cloud Router", [
+story += step_box("3", "Create Cloud Router  [All modes]", [
     Paragraph(
         "Create a Cloud Router in the VPC. The router is required by Cloud NAT (Step 4) "
         "to advertise and manage the egress IP.",
@@ -499,7 +602,7 @@ gcloud compute routers create <NAT_ROUTER_NAME> \\
 ])
 
 # ── Step 4 ────────────────────────────────────────────────────────────────────
-story += step_box("4", "Create Cloud NAT", [
+story += step_box("4", "Create Cloud NAT  [All modes]", [
     Paragraph(
         "Create a Cloud NAT gateway on the router. The gateway is scoped to "
         "<b>VPC_CONNECTOR_SUBNET</b> only — this ensures only traffic from the VPC "
@@ -519,7 +622,7 @@ gcloud compute routers nats create <NAT_GATEWAY_NAME> \\
 ])
 
 # ── Step 5 ────────────────────────────────────────────────────────────────────
-story += step_box("5", "Create Artifact Registry Repository", [
+story += step_box("5", "Create Artifact Registry Repository  [All modes]", [
     Paragraph("Create a Docker repository to store the proxy image:", S["body"]),
     code_block("""\
 gcloud artifacts repositories create <AR_REPO> \\
@@ -541,11 +644,12 @@ gcloud artifacts repositories add-iam-policy-binding <AR_REPO> \\
 ])
 
 # ── Step 6 ────────────────────────────────────────────────────────────────────
-story += step_box("6", "Build & Push Docker Image", [
+story += step_box("6", "Build & Push Docker Image  [All modes]", [
     Paragraph(
         "Build the nginx proxy Docker image using Cloud Build (no local Docker required). "
         "Cloud Build reads the Dockerfile from the <b>proxy/</b> directory and pushes the "
-        "result to Artifact Registry.",
+        "result to Artifact Registry. Both nginx config templates are baked into the image; "
+        "the correct one is selected at container startup by entrypoint.sh.",
         S["body"]),
     code_block("""\
 IMAGE="<REGION>-docker.pkg.dev/<PROJECT_ID>/<AR_REPO>/proxy:latest"
@@ -557,7 +661,7 @@ gcloud builds submit proxy/ \\
 ])
 
 # ── Step 7 ────────────────────────────────────────────────────────────────────
-story += step_box("7", "Create Serverless VPC Access Connector", [
+story += step_box("7", "Create Serverless VPC Access Connector  [All modes]", [
     Paragraph(
         "Create a Serverless VPC Access Connector that bridges Cloud Run's egress into "
         "the VPC so it can exit through Cloud NAT with the static IP. The connector subnet "
@@ -575,22 +679,25 @@ gcloud compute networks vpc-access connectors create <VPC_CONNECTOR_NAME> \\
 ])
 
 # ── Step 8 ────────────────────────────────────────────────────────────────────
-story += step_box("8", "Deploy Cloud Run Service", [
+story += step_box("8", "Deploy Cloud Run Service  [All modes]", [
     Paragraph(
-        "Deploy the nginx proxy container to Cloud Run. Two flags are critical for security "
-        "and correct egress routing:",
+        "Deploy the nginx proxy container to Cloud Run. The flags differ by hardening mode:",
         S["body"]),
     Paragraph(
         "<b>--vpc-egress=all-traffic</b> — forces ALL outbound traffic through the VPC "
-        "connector and therefore through Cloud NAT. Without this, only RFC-1918 traffic "
-        "uses the connector and Snowflake would see a dynamic Google IP.",
+        "connector and therefore through Cloud NAT. Required in all modes.",
         S["bullet"]),
     Paragraph(
-        "<b>--ingress=internal-and-cloud-load-balancing</b> — makes the raw Cloud Run URL "
-        "unreachable from the public internet. Only the Global LB (Step 13) can reach it, "
-        "making Cloud Armor the mandatory entry point.",
+        "<b>--ingress</b> — set to <i>internal-and-cloud-load-balancing</i> for modes B/AB "
+        "(direct URL unreachable; all traffic must pass through the LB and Cloud Armor). "
+        "Set to <i>all</i> for mode A (direct URL is publicly accessible; security from nginx path gate).",
+        S["bullet"]),
+    Paragraph(
+        "<b>PROXY_SECRET_PATH env var</b> — injected for modes A/AB so entrypoint.sh selects "
+        "the path-gated nginx config. Omitted for mode B so entrypoint.sh uses the open proxy config.",
         S["bullet"]),
     Spacer(1, 0.2*cm),
+    Paragraph("<b>Strategy A only</b> (--ingress=all, with PROXY_SECRET_PATH):", S["h3"]),
     code_block("""\
 IMAGE="<REGION>-docker.pkg.dev/<PROJECT_ID>/<AR_REPO>/proxy:latest"
 
@@ -605,13 +712,47 @@ gcloud run deploy <CLOUD_RUN_SERVICE_NAME> \\
     --cpu=1 \\
     --memory=512Mi \\
     --max-instances=3 \\
+    --ingress=all \\
+    --allow-unauthenticated"""),
+    Spacer(1, 0.2*cm),
+    Paragraph("<b>Strategy B only</b> (--ingress=internal-and-cloud-load-balancing, no PROXY_SECRET_PATH):", S["h3"]),
+    code_block("""\
+gcloud run deploy <CLOUD_RUN_SERVICE_NAME> \\
+    --image="${IMAGE}" \\
+    --region=<REGION> \\
+    --project=<PROJECT_ID> \\
+    --vpc-connector=<VPC_CONNECTOR_NAME> \\
+    --vpc-egress=all-traffic \\
+    --set-env-vars="SNOWFLAKE_HOST=<SNOWFLAKE_HOST>,SNOWFLAKE_PORT=<SNOWFLAKE_PORT>" \\
+    --port=8080 \\
+    --cpu=1 \\
+    --memory=512Mi \\
+    --max-instances=3 \\
     --ingress=internal-and-cloud-load-balancing \\
     --allow-unauthenticated"""),
-    success_box("Note the Service URL printed — it will be used in Steps 11 and referenced in verification."),
+    Spacer(1, 0.2*cm),
+    Paragraph("<b>Strategy A+B</b> (--ingress=internal-and-cloud-load-balancing, with PROXY_SECRET_PATH):", S["h3"]),
+    code_block("""\
+gcloud run deploy <CLOUD_RUN_SERVICE_NAME> \\
+    --image="${IMAGE}" \\
+    --region=<REGION> \\
+    --project=<PROJECT_ID> \\
+    --vpc-connector=<VPC_CONNECTOR_NAME> \\
+    --vpc-egress=all-traffic \\
+    --set-env-vars="SNOWFLAKE_HOST=<SNOWFLAKE_HOST>,SNOWFLAKE_PORT=<SNOWFLAKE_PORT>,PROXY_SECRET_PATH=<PROXY_SECRET_PATH>" \\
+    --port=8080 \\
+    --cpu=1 \\
+    --memory=512Mi \\
+    --max-instances=3 \\
+    --ingress=internal-and-cloud-load-balancing \\
+    --allow-unauthenticated"""),
+    success_box("Note the Service URL printed — it is the direct Cloud Run URL. For Strategy A it is your endpoint base. For B/AB it is used only by the LB (created in Steps 9–13)."),
 ])
 
 # ── Step 9 ────────────────────────────────────────────────────────────────────
-story += step_box("9", "Reserve Global Static IP (Load Balancer)", [
+story += step_box("9", "Reserve Global Static IP (Load Balancer)  [B / AB only]", [
+    mode_badge("Strategy B and AB only. Skip this step for Strategy A."),
+    Spacer(1, 0.2*cm),
     Paragraph(
         "Reserve a <b>global</b> static IP for the HTTPS Load Balancer. This must be "
         "global (not regional) — Global HTTPS Load Balancers require a global address. "
@@ -631,7 +772,9 @@ gcloud compute addresses describe <CLOUD_RUN_SERVICE_NAME>-lb-ip \\
 ])
 
 # ── Step 10 ───────────────────────────────────────────────────────────────────
-story += step_box("10", "Create Google-Managed SSL Certificate", [
+story += step_box("10", "Create Google-Managed SSL Certificate  [B / AB only]", [
+    mode_badge("Strategy B and AB only. Skip this step for Strategy A."),
+    Spacer(1, 0.2*cm),
     Paragraph(
         "Create a Google-managed SSL certificate for LB_DOMAIN. Google automatically "
         "provisions and renews the certificate once the DNS A record for LB_DOMAIN "
@@ -653,7 +796,9 @@ gcloud compute ssl-certificates describe <CLOUD_RUN_SERVICE_NAME>-cert \\
 ])
 
 # ── Step 11 ───────────────────────────────────────────────────────────────────
-story += step_box("11", "Create Serverless Network Endpoint Group (NEG)", [
+story += step_box("11", "Create Serverless Network Endpoint Group (NEG)  [B / AB only]", [
+    mode_badge("Strategy B and AB only. Skip this step for Strategy A."),
+    Spacer(1, 0.2*cm),
     Paragraph(
         "Create a Serverless NEG that connects the Global LB to the Cloud Run service "
         "without requiring a VPC. The NEG is regional and matched to the Cloud Run region.",
@@ -667,7 +812,9 @@ gcloud compute network-endpoint-groups create <CLOUD_RUN_SERVICE_NAME>-neg \\
 ])
 
 # ── Step 12 ───────────────────────────────────────────────────────────────────
-story += step_box("12", "Create Global Backend Service", [
+story += step_box("12", "Create Global Backend Service  [B / AB only]", [
+    mode_badge("Strategy B and AB only. Skip this step for Strategy A."),
+    Spacer(1, 0.2*cm),
     Paragraph(
         "Create a global backend service and attach the Serverless NEG. "
         "The backend service is the LB component that holds the NEG and will carry "
@@ -688,7 +835,9 @@ gcloud compute backend-services add-backend <CLOUD_RUN_SERVICE_NAME>-backend \\
 ])
 
 # ── Step 13 ───────────────────────────────────────────────────────────────────
-story += step_box("13", "Create Global HTTPS Load Balancer", [
+story += step_box("13", "Create Global HTTPS Load Balancer  [B / AB only]", [
+    mode_badge("Strategy B and AB only. Skip this step for Strategy A."),
+    Spacer(1, 0.2*cm),
     Paragraph(
         "Wire together three resources to form the Global HTTPS Load Balancer:",
         S["body"]),
@@ -720,7 +869,9 @@ gcloud compute forwarding-rules create <CLOUD_RUN_SERVICE_NAME>-fwd \\
 ])
 
 # ── Step 14 ───────────────────────────────────────────────────────────────────
-story += step_box("14", "Create Cloud Armor Security Policy", [
+story += step_box("14", "Create Cloud Armor Security Policy  [B / AB only]", [
+    mode_badge("Strategy B and AB only. Skip this step for Strategy A."),
+    Spacer(1, 0.2*cm),
     Paragraph(
         "Create a Cloud Armor security policy and attach it to the backend service. "
         "Evaluation happens at the LB edge before requests reach Cloud Run. "
@@ -762,12 +913,14 @@ story += [
     Paragraph("6. Post-Provisioning Configuration", S["h1"]),
     hr(),
     Paragraph(
-        "Complete these steps after all 14 provisioning steps succeed. "
+        "Complete these steps after all provisioning steps succeed. "
         "These are manual actions outside of the automated script.",
         S["body"]),
     Spacer(1, 0.3*cm),
 
-    Paragraph("6.1  DNS A Record", S["h2"]),
+    Paragraph("6.1  DNS A Record  [B / AB only]", S["h2"]),
+    mode_badge("Required for Strategy B and AB only. Skip for Strategy A."),
+    Spacer(1, 0.2*cm),
     Paragraph(
         "Create a DNS A record mapping your LB_DOMAIN to the global LB IP reserved in Step 9. "
         "The SSL certificate will remain in PROVISIONING status until this record propagates.",
@@ -796,7 +949,7 @@ story += [
     code_block("nslookup <LB_DOMAIN>"),
     Spacer(1, 0.4*cm),
 
-    Paragraph("6.2  Snowflake Network Policy", S["h2"]),
+    Paragraph("6.2  Snowflake Network Policy  [All modes]", S["h2"]),
     Paragraph(
         "Add the static egress IP (from Step 2) to your Snowflake network policy. "
         "Run this in Snowsight or via the Snowflake CLI:",
@@ -806,15 +959,41 @@ ALTER NETWORK POLICY <your_policy_name>
   ADD ALLOWED_IP_LIST = ('<STATIC_EGRESS_IP>/32');"""),
     Spacer(1, 0.4*cm),
 
-    Paragraph("6.3  Gemini Enterprise Connector", S["h2"]),
+    Paragraph("6.3  Gemini Enterprise Connector  [All modes]", S["h2"]),
     Paragraph(
-        "Configure the Gemini Enterprise connector with the following endpoint URL. "
-        "The URL includes the secret path segment — this must be kept confidential.",
+        "Configure the Gemini Enterprise connector with the endpoint URL for your mode:",
         S["body"]),
-    code_block("https://<LB_DOMAIN>/<PROXY_SECRET_PATH>/"),
+]
+
+endpoint_rows = [
+    ["Mode", "Endpoint URL format", "Notes"],
+    ["A", "https://<cloud-run-url>/<PROXY_SECRET_PATH>/",
+     "Use the Service URL printed by Step 8. Include the trailing slash."],
+    ["B", "https://<LB_DOMAIN>/",
+     "Use LB_DOMAIN. DNS must be propagated and SSL cert must be ACTIVE."],
+    ["AB", "https://<LB_DOMAIN>/<PROXY_SECRET_PATH>/",
+     "Use LB_DOMAIN with secret path. Include the trailing slash. Keep the URL confidential."],
+]
+ep_t = Table(endpoint_rows, colWidths=[1.5*cm, 5.5*cm, W - 11.5*cm])
+ep_t.setStyle(TableStyle([
+    ("BACKGROUND", (0,0), (-1,0), DARK_BLUE),
+    ("TEXTCOLOR", (0,0), (-1,0), colors.white),
+    ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+    ("FONTSIZE", (0,0), (-1,-1), 8.5),
+    ("GRID", (0,0), (-1,-1), 0.4, GREY_LINE),
+    ("LEFTPADDING", (0,0), (-1,-1), 7),
+    ("TOPPADDING", (0,0), (-1,-1), 4),
+    ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+    ("VALIGN", (0,0), (-1,-1), "TOP"),
+    ("ROWBACKGROUNDS", (0,1), (-1,-1), [GREY_BG, colors.white]),
+    ("FONTNAME", (0,1), (1,-1), "Courier"),
+    ("FONTSIZE", (0,1), (1,-1), 7.5),
+]))
+story += [
+    ep_t,
     Spacer(1, 0.2*cm),
     note_box(
-        "The trailing slash after PROXY_SECRET_PATH is required. "
+        "The trailing slash after PROXY_SECRET_PATH is required for modes A and AB. "
         "nginx will return 404 if the path does not include the exact secret segment.",
         bg=WARN_BG, line=WARN_LINE, label="IMPORTANT"),
     PageBreak(),
@@ -824,32 +1003,39 @@ ALTER NETWORK POLICY <your_policy_name>
 story += [
     Paragraph("7. Verification", S["h1"]),
     hr(),
-    Paragraph("Run these checks in order to confirm the full data path is working:", S["body"]),
-    Spacer(1, 0.2*cm),
-    Paragraph("7.1  Secret Path Gate", S["h3"]),
-    Paragraph("A request to any path other than the secret path must return HTTP 404:", S["body"]),
-    code_block("curl -si https://<LB_DOMAIN>/anything | head -5"),
-    Paragraph("Expected: HTTP/2 404", S["note"]),
-    Spacer(1, 0.3*cm),
-
-    Paragraph("7.2  Cloud Armor Gate", S["h3"]),
-    Paragraph("The direct Cloud Run URL must be unreachable (connection refused or HTTP 403):", S["body"]),
-    code_block("curl -si https://<cloud-run-url>/ | head -5"),
-    Paragraph("Expected: connection refused or HTTP 403", S["note"]),
-    Spacer(1, 0.3*cm),
-
-    Paragraph("7.3  Proxy Connectivity", S["h3"]),
     Paragraph(
-        "A request with the correct secret path should reach Snowflake. "
+        "Run the checks that apply to your hardening mode to confirm the full data path is working.",
+        S["body"]),
+    Spacer(1, 0.2*cm),
+    Paragraph("7.1  Secret Path Gate  [A / AB only]", S["h3"]),
+    Paragraph("A request to any path other than the secret path must return HTTP 404:", S["body"]),
+    code_block("curl -si https://<endpoint>/anything | head -5"),
+    Paragraph("Expected: HTTP/1.1 404 or HTTP/2 404", S["note"]),
+    Spacer(1, 0.3*cm),
+
+    Paragraph("7.2  Cloud Armor Gate  [B / AB only]", S["h3"]),
+    Paragraph("The direct Cloud Run URL must return HTTP 403 (Cloud Run ingress blocks non-LB traffic):", S["body"]),
+    code_block("curl -si https://<cloud-run-url>/ | head -5"),
+    Paragraph("Expected: HTTP/2 403", S["note"]),
+    Spacer(1, 0.3*cm),
+
+    Paragraph("7.3  Proxy Connectivity  [All modes]", S["h3"]),
+    Paragraph(
+        "A request with the correct endpoint URL should reach Snowflake. "
         "Any Snowflake response (including 401 Unauthorized) confirms the proxy is forwarding correctly:",
         S["body"]),
     code_block("""\
-curl -si https://<LB_DOMAIN>/<PROXY_SECRET_PATH>/api/v2/mcp/sse \\
+# Strategy A or AB (with secret path)
+curl -si https://<endpoint>/<PROXY_SECRET_PATH>/api/v2/mcp/sse \\
+    -H 'Authorization: Bearer <snowflake_token>' | head -10
+
+# Strategy B only (no secret path)
+curl -si https://<LB_DOMAIN>/api/v2/mcp/sse \\
     -H 'Authorization: Bearer <snowflake_token>' | head -10"""),
     Paragraph("Expected: any HTTP response from Snowflake (401 without credentials is correct behaviour)", S["note"]),
     Spacer(1, 0.3*cm),
 
-    Paragraph("7.4  Confirm Snowflake Sees the Static IP", S["h3"]),
+    Paragraph("7.4  Confirm Snowflake Sees the Static IP  [All modes]", S["h3"]),
     Paragraph(
         "After running a query through the Gemini connector, verify in Snowsight "
         "that the client IP matches the reserved static egress IP:",
@@ -863,7 +1049,7 @@ LIMIT 5;"""),
     Paragraph("Expected: client_net_address = <STATIC_EGRESS_IP>", S["note"]),
     Spacer(1, 0.3*cm),
 
-    Paragraph("7.5  SSL Certificate Status", S["h3"]),
+    Paragraph("7.5  SSL Certificate Status  [B / AB only]", S["h3"]),
     code_block("""\
 gcloud compute ssl-certificates describe <CLOUD_RUN_SERVICE_NAME>-cert \\
     --global --project=<PROJECT_ID> \\
@@ -874,8 +1060,10 @@ gcloud compute ssl-certificates describe <CLOUD_RUN_SERVICE_NAME>-cert \\
 
 # ─────────────────────────── SECTION 8 — ROTATION ────────────────────────────
 story += [
-    Paragraph("8. Secret Rotation", S["h1"]),
+    Paragraph("8. Secret Rotation  [A / AB only]", S["h1"]),
     hr(),
+    mode_badge("Applies to Strategy A and AB only. No secret to rotate for Strategy B."),
+    Spacer(1, 0.2*cm),
     Paragraph(
         "Rotate the PROXY_SECRET_PATH if it is compromised or as part of regular key rotation. "
         "The Gemini connector endpoint URL must be updated at the same time.",
@@ -893,7 +1081,7 @@ gcloud run deploy <CLOUD_RUN_SERVICE_NAME> \\
     --project=<PROJECT_ID> \\
     --update-env-vars="PROXY_SECRET_PATH=<NEW_SECRET_PATH>" """),
     Paragraph("Step 4 — Update the Gemini Enterprise connector endpoint URL:", S["h3"]),
-    code_block("https://<LB_DOMAIN>/<NEW_PROXY_SECRET_PATH>/"),
+    code_block("https://<LB_DOMAIN>/<NEW_PROXY_SECRET_PATH>/   # for AB\nhttps://<cloud-run-url>/<NEW_PROXY_SECRET_PATH>/   # for A only"),
     note_box(
         "During the time between redeployment and updating the Gemini connector, "
         "requests using the old secret path will receive HTTP 404. "
@@ -906,29 +1094,30 @@ story += [
     Paragraph("9. Resources Provisioned — Summary Table", S["h1"]),
     hr(),
     Paragraph(
-        "All resources created by this runbook, in provisioning order.",
+        "All resources created by this runbook, in provisioning order. "
+        "Resources marked <b>B / AB</b> are only created when HARDENING_MODE includes Strategy B.",
         S["body"]),
     Spacer(1, 0.3*cm),
 ]
 summary = [
-    ["Step", "Resource", "Type", "Scope", "Purpose"],
-    ["2",  "<NAT_IP_NAME>",                    "External IP",          "Regional", "Fixed egress IP allowlisted in Snowflake"],
-    ["3",  "<NAT_ROUTER_NAME>",                "Cloud Router",         "Regional", "Enables Cloud NAT"],
-    ["4",  "<NAT_GATEWAY_NAME>",               "Cloud NAT",            "Regional", "Routes connector egress through static IP"],
-    ["5",  "<AR_REPO>",                        "Artifact Registry",    "Regional", "Stores the nginx proxy Docker image"],
-    ["6",  "proxy:latest",                     "Docker Image",         "Regional", "nginx proxy container built by Cloud Build"],
-    ["7",  "<VPC_CONNECTOR_NAME>",             "VPC Connector",        "Regional", "Bridges Cloud Run egress into VPC"],
-    ["8",  "<CLOUD_RUN_SERVICE_NAME>",         "Cloud Run Service",    "Regional", "nginx proxy; ingress locked to LB only"],
-    ["9",  "<CLOUD_RUN_SERVICE_NAME>-lb-ip",   "Global IP",            "Global",   "Front-door IP; DNS A record target"],
-    ["10", "<CLOUD_RUN_SERVICE_NAME>-cert",    "SSL Certificate",      "Global",   "TLS for LB_DOMAIN; auto-renewed"],
-    ["11", "<CLOUD_RUN_SERVICE_NAME>-neg",     "Serverless NEG",       "Regional", "Connects Global LB to Cloud Run"],
-    ["12", "<CLOUD_RUN_SERVICE_NAME>-backend", "Backend Service",      "Global",   "LB backend; carries Cloud Armor policy"],
-    ["13", "<CLOUD_RUN_SERVICE_NAME>-urlmap",  "URL Map",              "Global",   "Routes all paths to backend service"],
-    ["13", "<CLOUD_RUN_SERVICE_NAME>-https-proxy","HTTPS Proxy",       "Global",   "Terminates TLS with managed cert"],
-    ["13", "<CLOUD_RUN_SERVICE_NAME>-fwd",     "Forwarding Rule",      "Global",   "Binds global IP to HTTPS proxy on :443"],
-    ["14", "<CLOUD_RUN_SERVICE_NAME>-armor",   "Cloud Armor Policy",   "Global",   "Allows GCP IPs; denies all others (403)"],
+    ["Step", "Resource", "Type", "Scope", "Mode", "Purpose"],
+    ["2",  "<NAT_IP_NAME>",                    "External IP",          "Regional", "All",  "Fixed egress IP allowlisted in Snowflake"],
+    ["3",  "<NAT_ROUTER_NAME>",                "Cloud Router",         "Regional", "All",  "Enables Cloud NAT"],
+    ["4",  "<NAT_GATEWAY_NAME>",               "Cloud NAT",            "Regional", "All",  "Routes connector egress through static IP"],
+    ["5",  "<AR_REPO>",                        "Artifact Registry",    "Regional", "All",  "Stores the nginx proxy Docker image"],
+    ["6",  "proxy:latest",                     "Docker Image",         "Regional", "All",  "nginx proxy container built by Cloud Build"],
+    ["7",  "<VPC_CONNECTOR_NAME>",             "VPC Connector",        "Regional", "All",  "Bridges Cloud Run egress into VPC"],
+    ["8",  "<CLOUD_RUN_SERVICE_NAME>",         "Cloud Run Service",    "Regional", "All",  "nginx proxy; egress via VPC connector"],
+    ["9",  "<CLOUD_RUN_SERVICE_NAME>-lb-ip",   "Global IP",            "Global",   "B/AB", "Front-door IP; DNS A record target"],
+    ["10", "<CLOUD_RUN_SERVICE_NAME>-cert",    "SSL Certificate",      "Global",   "B/AB", "TLS for LB_DOMAIN; auto-renewed"],
+    ["11", "<CLOUD_RUN_SERVICE_NAME>-neg",     "Serverless NEG",       "Regional", "B/AB", "Connects Global LB to Cloud Run"],
+    ["12", "<CLOUD_RUN_SERVICE_NAME>-backend", "Backend Service",      "Global",   "B/AB", "LB backend; carries Cloud Armor policy"],
+    ["13", "<CLOUD_RUN_SERVICE_NAME>-urlmap",  "URL Map",              "Global",   "B/AB", "Routes all paths to backend service"],
+    ["13", "<CLOUD_RUN_SERVICE_NAME>-https-proxy","HTTPS Proxy",       "Global",   "B/AB", "Terminates TLS with managed cert"],
+    ["13", "<CLOUD_RUN_SERVICE_NAME>-fwd",     "Forwarding Rule",      "Global",   "B/AB", "Binds global IP to HTTPS proxy on :443"],
+    ["14", "<CLOUD_RUN_SERVICE_NAME>-armor",   "Cloud Armor Policy",   "Global",   "B/AB", "Allows GCP IPs; denies all others (403)"],
 ]
-st = Table(summary, colWidths=[1.2*cm, 5.0*cm, 3.2*cm, 2.0*cm, W - 15.4*cm])
+st = Table(summary, colWidths=[1.2*cm, 4.6*cm, 3.0*cm, 1.8*cm, 1.2*cm, W - 15.8*cm])
 st.setStyle(TableStyle([
     ("BACKGROUND", (0,0), (-1,0), DARK_BLUE),
     ("TEXTCOLOR", (0,0), (-1,0), colors.white),
@@ -942,9 +1131,10 @@ st.setStyle(TableStyle([
     ("ROWBACKGROUNDS", (0,1), (-1,-1), [GREY_BG, colors.white]),
     ("FONTNAME", (1,1), (1,-1), "Courier"),
     ("FONTSIZE", (1,1), (1,-1), 7),
+    ("BACKGROUND", (0,9), (-1,-1), MODE_B_BG),
 ]))
 story += [st, Spacer(1, 0.8*cm), hr(),
-          Paragraph(f"Snowflake Connector Proxy — Administrator Runbook v1.0 — {date.today().strftime('%B %d, %Y')}", S["center"])]
+          Paragraph(f"Snowflake Connector Proxy — Administrator Runbook v2.0 — {date.today().strftime('%B %d, %Y')}", S["center"])]
 
 # ── Build ──────────────────────────────────────────────────────────────────────
 doc.build(story, onFirstPage=on_first_page, onLaterPages=on_later_pages)

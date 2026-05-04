@@ -1,0 +1,41 @@
+events {
+    worker_connections 1024;
+}
+
+http {
+    access_log  /dev/stdout;
+    error_log   /dev/stderr;
+
+    server {
+        listen 8080;
+        server_name _;
+
+        # Required for MCP Server-Sent Events — disable all buffering so
+        # event stream chunks are forwarded to Gemini immediately.
+        proxy_buffering           off;
+        proxy_cache               off;
+        chunked_transfer_encoding on;
+
+        # Open proxy — no secret path gate.
+        # Security relies entirely on Cloud Armor (Strategy B) blocking
+        # non-GCP traffic before it reaches this service.
+        location / {
+            proxy_pass            https://${SNOWFLAKE_HOST}:${SNOWFLAKE_PORT};
+            proxy_http_version    1.1;
+
+            proxy_set_header      Host              "${SNOWFLAKE_HOST}";
+            proxy_set_header      Connection        "";
+
+            proxy_ssl_server_name on;
+            proxy_ssl_name        "${SNOWFLAKE_HOST}";
+            proxy_ssl_verify      on;
+            proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
+
+            proxy_pass_request_headers on;
+
+            proxy_connect_timeout 10s;
+            proxy_read_timeout    3600s;
+            proxy_send_timeout    3600s;
+        }
+    }
+}
