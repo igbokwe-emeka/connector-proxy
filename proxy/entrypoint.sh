@@ -1,9 +1,7 @@
 #!/bin/sh
 set -e
 
-# Substitute only these variables so envsubst does not touch any other
-# $ references that nginx itself uses internally.
-envsubst '${SNOWFLAKE_HOST} ${SNOWFLAKE_PORT} ${PROXY_SECRET_PATH}' \
+envsubst '${SNOWFLAKE_HOST} ${SNOWFLAKE_PORT}' \
     < /etc/nginx/nginx.conf.template \
     > /etc/nginx/nginx.conf
 

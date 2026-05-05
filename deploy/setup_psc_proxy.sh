@@ -14,45 +14,18 @@ fi
 # Snowflake Connector Proxy — Cloud Run + VPC Connector Setup
 # =============================================================================
 # Provisions GCP resources so the Gemini Enterprise connector can reach
-# Snowflake through a customer-controlled static egress IP, with two
-# independent security layers (Cloud Armor + secret path) protecting the proxy.
+# Snowflake through a customer-controlled static egress IP.
 #
 # Traffic flow:
 #   Gemini Enterprise connector
-#       │  HTTPS  →  https://<LB_DOMAIN>/<PROXY_SECRET_PATH>/...
+#       │  HTTPS  →  https://<cloud-run-url>/
 #       ▼
-#   Cloud Armor  (blocks all non-Google-Cloud source IPs at the LB edge)
-#       ▼
-#   Global HTTPS Load Balancer  →  Serverless NEG
-#       ▼
-#   Cloud Run  (nginx — secret path gate, rewrites Host, proxies to Snowflake)
-#       │  --ingress=internal-and-cloud-load-balancing: direct Cloud Run URL
-#       │  is not reachable from the public internet
-#       │  --vpc-egress=all-traffic: all outbound traffic routed through VPC
-#       ▼
-#   Serverless VPC Access Connector
+#   Cloud Run  (nginx — proxies all traffic to Snowflake)
+#       │  --vpc-egress=all-traffic  →  Serverless VPC Access Connector
 #       ▼
 #   Cloud NAT  ──►  Static External IP  (allowlisted in Snowflake network policy)
 #       ▼
 #   Snowflake
-#
-# Security layers:
-#   1. Cloud Armor: uses evaluateThreatIntelligence('iplist-public-clouds-gcp')
-#      to allow only Google Cloud Platform source IPs at the LB edge; all
-#      other traffic is denied with HTTP 403. Requires Cloud Armor Enterprise.
-#   2. Secret path: nginx returns 404 for any URL not containing
-#      PROXY_SECRET_PATH, preventing scanners from identifying the service.
-#
-# Gemini Enterprise connector settings (printed at end of script):
-#   Endpoint URL: https://<LB_DOMAIN>/<PROXY_SECRET_PATH>/
-#
-# Prerequisites:
-#   - gcloud CLI authenticated (gcloud auth login)
-#   - Docker not required — image is built in the cloud via Cloud Build
-#   - .env file populated (copy from .env.example), including:
-#       PROXY_SECRET_PATH  — generate with: openssl rand -hex 16
-#       LB_DOMAIN          — domain name you control (e.g. proxy.yourdomain.com)
-#                            point its DNS A record at the LB IP printed below
 #
 # Usage:
 #   bash deploy/setup_psc_proxy.sh
@@ -81,11 +54,6 @@ set -a; source "${ENV_FILE}"; set +a
 : "${VPC_CONNECTOR_SUBNET:?VPC_CONNECTOR_SUBNET must be set in .env}"
 : "${CLOUD_RUN_SERVICE_NAME:?CLOUD_RUN_SERVICE_NAME must be set in .env}"
 : "${AR_REPO:?AR_REPO must be set in .env}"
-: "${PROXY_SECRET_PATH:?PROXY_SECRET_PATH must be set in .env — run: openssl rand -hex 16}"
-: "${LB_DOMAIN:?LB_DOMAIN must be set in .env — domain name that will front the Global LB}"
-# CLOUD_DNS_ZONE is optional — if set, the script creates the DNS A record automatically.
-# If unset, the A record must be created manually before the SSL cert can provision.
-CLOUD_DNS_ZONE="${CLOUD_DNS_ZONE:-}"
 # ──────────────────────────────────────────────────────────────────────────────
 
 _IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/proxy:latest"
@@ -98,16 +66,9 @@ echo "  Region:         ${REGION}"
 echo "  VPC:            ${VPC_NETWORK} (connector subnet: ${VPC_CONNECTOR_SUBNET})"
 echo "  Snowflake host: ${SNOWFLAKE_HOST}:${SNOWFLAKE_PORT}"
 echo "  Image:          ${_IMAGE}"
-echo "  LB domain:      ${LB_DOMAIN}"
 echo ""
 
 # ── Step 1: Enable required APIs ─────────────────────────────────────────────
-# compute.googleapis.com    — Cloud NAT, Cloud Router, Global LB, Cloud Armor
-# run.googleapis.com        — Cloud Run service
-# vpcaccess.googleapis.com  — Serverless VPC Access Connector
-# artifactregistry.googleapis.com — Docker image registry
-# cloudbuild.googleapis.com — builds the proxy image without local Docker
-# networkservices.googleapis.com  — Global LB URL map / NEG wiring
 echo "=== Step 1: Enabling required GCP APIs ==="
 gcloud services enable \
     compute.googleapis.com \
@@ -115,7 +76,6 @@ gcloud services enable \
     vpcaccess.googleapis.com \
     artifactregistry.googleapis.com \
     cloudbuild.googleapis.com \
-    networkservices.googleapis.com \
     --project="${PROJECT_ID}"
 echo "  Done."
 
@@ -222,11 +182,8 @@ fi
 # --vpc-egress=all-traffic: forces ALL outbound traffic through the VPC
 #   connector and therefore through Cloud NAT — without this only RFC-1918
 #   traffic uses the connector and Snowflake would see a dynamic Google IP.
-# --ingress=internal-and-cloud-load-balancing: the raw Cloud Run URL is not
-#   reachable from the public internet; only the Global LB (Step 13) can reach
-#   it, so Cloud Armor (Step 14) is the mandatory entry point.
-# PROXY_SECRET_PATH is injected as an env var and substituted into the nginx
-#   config at container startup — nginx returns 404 for paths not matching it.
+# --ingress=all: the Cloud Run URL is publicly accessible so Gemini Enterprise
+#   can reach it directly.
 echo ""
 echo "=== Step 8: Deploying Cloud Run service ==="
 gcloud run deploy "${CLOUD_RUN_SERVICE_NAME}" \
@@ -235,185 +192,18 @@ gcloud run deploy "${CLOUD_RUN_SERVICE_NAME}" \
     --project="${PROJECT_ID}" \
     --vpc-connector="${VPC_CONNECTOR_NAME}" \
     --vpc-egress=all-traffic \
-    --set-env-vars="SNOWFLAKE_HOST=${SNOWFLAKE_HOST},SNOWFLAKE_PORT=${SNOWFLAKE_PORT},PROXY_SECRET_PATH=${PROXY_SECRET_PATH}" \
+    --set-env-vars="SNOWFLAKE_HOST=${SNOWFLAKE_HOST},SNOWFLAKE_PORT=${SNOWFLAKE_PORT}" \
     --port=8080 \
     --cpu=1 \
     --memory=512Mi \
     --max-instances=3 \
-    --ingress=internal-and-cloud-load-balancing \
+    --ingress=all \
     --allow-unauthenticated
 echo "  Deployed: ${CLOUD_RUN_SERVICE_NAME}"
 
 _RUN_URL=$(gcloud run services describe "${CLOUD_RUN_SERVICE_NAME}" \
     --region="${REGION}" --project="${PROJECT_ID}" \
     --format="value(status.url)")
-
-# ── Step 9: Global static IP for the Load Balancer ───────────────────────────
-# Must be --global (not regional) — Global HTTPS Load Balancers require a
-# global address. Point LB_DOMAIN's DNS A record at this IP after creation;
-# the managed certificate (Step 10) won't provision until DNS resolves.
-echo ""
-echo "=== Step 9: Reserving global static IP for Load Balancer ==="
-if ! gcloud compute addresses describe "${CLOUD_RUN_SERVICE_NAME}-lb-ip" \
-    --global --project="${PROJECT_ID}" &>/dev/null; then
-  gcloud compute addresses create "${CLOUD_RUN_SERVICE_NAME}-lb-ip" \
-      --global --project="${PROJECT_ID}"
-  echo "  Created: ${CLOUD_RUN_SERVICE_NAME}-lb-ip"
-else
-  echo "  Already exists: ${CLOUD_RUN_SERVICE_NAME}-lb-ip"
-fi
-_LB_IP=$(gcloud compute addresses describe "${CLOUD_RUN_SERVICE_NAME}-lb-ip" \
-    --global --project="${PROJECT_ID}" --format="value(address)")
-echo "  LB IP: ${_LB_IP}"
-
-# ── Step 9b: DNS A record (automated via Cloud DNS if CLOUD_DNS_ZONE is set) ──
-# If CLOUD_DNS_ZONE is set the script creates (or updates) the DNS A record that
-# points LB_DOMAIN at the LB IP. The managed SSL certificate (Step 10) will not
-# provision until this record resolves publicly.
-echo ""
-echo "=== Step 9b: DNS A record for ${LB_DOMAIN} ==="
-if [[ -n "${CLOUD_DNS_ZONE}" ]]; then
-  _DNS_NAME="${LB_DOMAIN}."
-  if gcloud dns record-sets describe "${_DNS_NAME}" \
-      --zone="${CLOUD_DNS_ZONE}" --type=A \
-      --project="${PROJECT_ID}" &>/dev/null; then
-    echo "  Already exists: ${_DNS_NAME} A ${_LB_IP}"
-  else
-    gcloud dns record-sets create "${_DNS_NAME}" \
-        --zone="${CLOUD_DNS_ZONE}" \
-        --type=A \
-        --ttl=300 \
-        --rrdatas="${_LB_IP}" \
-        --project="${PROJECT_ID}"
-    echo "  Created: ${_DNS_NAME} A ${_LB_IP} (TTL 300)"
-  fi
-else
-  echo "  CLOUD_DNS_ZONE not set — create this DNS record manually before the SSL cert can provision:"
-  echo "    ${LB_DOMAIN}  →  ${_LB_IP}  (A record, TTL 300)"
-fi
-
-# ── Step 10: Google-managed SSL certificate ───────────────────────────────────
-# Google provisions and auto-renews the cert once LB_DOMAIN's A record
-# propagates to the LB IP (Step 9). Provisioning typically takes ~15 minutes
-# after DNS is live. The cert is attached to the HTTPS proxy in Step 13.
-echo ""
-echo "=== Step 10: Google-managed SSL certificate ==="
-if ! gcloud compute ssl-certificates describe "${CLOUD_RUN_SERVICE_NAME}-cert" \
-    --global --project="${PROJECT_ID}" &>/dev/null; then
-  gcloud compute ssl-certificates create "${CLOUD_RUN_SERVICE_NAME}-cert" \
-      --domains="${LB_DOMAIN}" \
-      --global --project="${PROJECT_ID}"
-  echo "  Created: ${CLOUD_RUN_SERVICE_NAME}-cert (provisioning takes ~15 min after DNS propagates)"
-else
-  echo "  Already exists: ${CLOUD_RUN_SERVICE_NAME}-cert"
-fi
-
-# ── Step 11: Serverless NEG pointing at the Cloud Run service ─────────────────
-# A Serverless NEG connects the Global LB to a Cloud Run service without
-# requiring a VPC. The NEG is regional (matches the Cloud Run region) and is
-# attached to the global backend service in Step 12.
-echo ""
-echo "=== Step 11: Serverless NEG ==="
-if ! gcloud compute network-endpoint-groups describe "${CLOUD_RUN_SERVICE_NAME}-neg" \
-    --region="${REGION}" --project="${PROJECT_ID}" &>/dev/null; then
-  gcloud compute network-endpoint-groups create "${CLOUD_RUN_SERVICE_NAME}-neg" \
-      --region="${REGION}" \
-      --network-endpoint-type=serverless \
-      --cloud-run-service="${CLOUD_RUN_SERVICE_NAME}" \
-      --project="${PROJECT_ID}"
-  echo "  Created: ${CLOUD_RUN_SERVICE_NAME}-neg"
-else
-  echo "  Already exists: ${CLOUD_RUN_SERVICE_NAME}-neg"
-fi
-
-# ── Step 12: Backend service ──────────────────────────────────────────────────
-# The backend service is the LB component that holds the NEG and will carry
-# the Cloud Armor policy (attached in Step 14). It must be --global to pair
-# with the Global HTTPS LB created in Step 13.
-echo ""
-echo "=== Step 12: Backend service ==="
-if ! gcloud compute backend-services describe "${CLOUD_RUN_SERVICE_NAME}-backend" \
-    --global --project="${PROJECT_ID}" &>/dev/null; then
-  gcloud compute backend-services create "${CLOUD_RUN_SERVICE_NAME}-backend" \
-      --global --project="${PROJECT_ID}"
-  gcloud compute backend-services add-backend "${CLOUD_RUN_SERVICE_NAME}-backend" \
-      --global \
-      --network-endpoint-group="${CLOUD_RUN_SERVICE_NAME}-neg" \
-      --network-endpoint-group-region="${REGION}" \
-      --project="${PROJECT_ID}"
-  echo "  Created: ${CLOUD_RUN_SERVICE_NAME}-backend"
-else
-  echo "  Already exists: ${CLOUD_RUN_SERVICE_NAME}-backend"
-fi
-
-# ── Step 13: URL map, HTTPS proxy, forwarding rule ────────────────────────────
-# Three resources wired together to form the Global HTTPS Load Balancer:
-#   url-map          — routes all paths to the backend service (Step 12)
-#   target-https-proxy — terminates TLS using the managed cert (Step 10)
-#   forwarding-rule  — binds the global IP (Step 9) to the HTTPS proxy on :443
-echo ""
-echo "=== Step 13: Global HTTPS Load Balancer ==="
-if ! gcloud compute url-maps describe "${CLOUD_RUN_SERVICE_NAME}-urlmap" \
-    --global --project="${PROJECT_ID}" &>/dev/null; then
-  gcloud compute url-maps create "${CLOUD_RUN_SERVICE_NAME}-urlmap" \
-      --default-service="${CLOUD_RUN_SERVICE_NAME}-backend" \
-      --global --project="${PROJECT_ID}"
-  gcloud compute target-https-proxies create "${CLOUD_RUN_SERVICE_NAME}-https-proxy" \
-      --url-map="${CLOUD_RUN_SERVICE_NAME}-urlmap" \
-      --ssl-certificates="${CLOUD_RUN_SERVICE_NAME}-cert" \
-      --global --project="${PROJECT_ID}"
-  gcloud compute forwarding-rules create "${CLOUD_RUN_SERVICE_NAME}-fwd" \
-      --global \
-      --target-https-proxy="${CLOUD_RUN_SERVICE_NAME}-https-proxy" \
-      --address="${CLOUD_RUN_SERVICE_NAME}-lb-ip" \
-      --ports=443 \
-      --project="${PROJECT_ID}"
-  echo "  Created: URL map → HTTPS proxy → forwarding rule"
-else
-  echo "  Already exists: ${CLOUD_RUN_SERVICE_NAME}-urlmap"
-fi
-
-# ── Step 14: Cloud Armor security policy ──────────────────────────────────────
-# Attached to the backend service (Step 12) so evaluation happens at the LB
-# edge before requests reach Cloud Run. Two rules:
-#   priority 1000        — allow only Google Cloud Platform source IPs
-#                          (Gemini Enterprise runs on GCP infrastructure)
-#   priority 2147483647  — default deny-403 for anything not matched above
-#
-# Uses evaluateThreatIntelligence('iplist-public-clouds-gcp') — the Google
-# Threat Intelligence feed for GCP IP ranges. Requires Cloud Armor Enterprise
-# subscription on the project (distinct from evaluatePreconfiguredExpr which
-# is for WAF rules and CDN IP lists only).
-echo ""
-echo "=== Step 14: Cloud Armor security policy ==="
-if ! gcloud compute security-policies describe "${CLOUD_RUN_SERVICE_NAME}-armor" \
-    --project="${PROJECT_ID}" &>/dev/null; then
-  gcloud compute security-policies create "${CLOUD_RUN_SERVICE_NAME}-armor" \
-      --description="Allow GCP source IPs only via Threat Intelligence feed" \
-      --project="${PROJECT_ID}"
-
-  # Priority 1000: allow traffic from GCP IP ranges using the Threat Intelligence
-  # feed — only Google Cloud source IPs (where Gemini runs) are permitted.
-  gcloud compute security-policies rules create 1000 \
-      --security-policy="${CLOUD_RUN_SERVICE_NAME}-armor" \
-      --expression="evaluateThreatIntelligence('iplist-public-clouds-gcp')" \
-      --action=allow \
-      --project="${PROJECT_ID}"
-
-  # Default rule (priority 2147483647): deny-403 as the fallback catch-all
-  gcloud compute security-policies rules update 2147483647 \
-      --security-policy="${CLOUD_RUN_SERVICE_NAME}-armor" \
-      --action=deny-403 \
-      --project="${PROJECT_ID}"
-
-  gcloud compute backend-services update "${CLOUD_RUN_SERVICE_NAME}-backend" \
-      --global \
-      --security-policy="${CLOUD_RUN_SERVICE_NAME}-armor" \
-      --project="${PROJECT_ID}"
-  echo "  Created and attached: ${CLOUD_RUN_SERVICE_NAME}-armor"
-else
-  echo "  Already exists: ${CLOUD_RUN_SERVICE_NAME}-armor"
-fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
@@ -424,19 +214,8 @@ echo "║"
 echo "║  Static outbound IP (allowlist in Snowflake):"
 echo "║    ${NAT_IP_ADDRESS}"
 echo "║"
-if [[ -n "${CLOUD_DNS_ZONE}" ]]; then
-  echo "║  DNS A record created automatically in zone: ${CLOUD_DNS_ZONE}"
-  echo "║    ${LB_DOMAIN}  →  ${_LB_IP}"
-else
-  echo "║  ACTION REQUIRED — create DNS A record:"
-  echo "║    ${LB_DOMAIN}  →  ${_LB_IP}"
-fi
-echo "║"
 echo "║  In Gemini Enterprise → connector configuration:"
-echo "║    Endpoint URL: https://${LB_DOMAIN}/${PROXY_SECRET_PATH}/"
-echo "║"
-echo "║  Direct Cloud Run URL is now ingress-restricted (not publicly reachable)."
-echo "║  Cloud Armor blocks all non-Google-Cloud source IPs."
+echo "║    MCP URL:  ${_RUN_URL}/"
 echo "║"
 echo "╚══════════════════════════════════════════════════════════════════════╝"
 echo ""
@@ -445,9 +224,5 @@ echo "    ALTER NETWORK POLICY <your_policy_name>"
 echo "      ADD ALLOWED_IP_LIST = ('${NAT_IP_ADDRESS}/32');"
 echo ""
 echo "  Verify the proxy is forwarding correctly:"
-echo "    curl -si https://${LB_DOMAIN}/${PROXY_SECRET_PATH}/api/v2/mcp/sse \\"
-echo "        -H 'Authorization: Bearer <token>' | head -5"
-echo ""
-echo "  Verify secret path gate (expect 404):"
-echo "    curl -si https://${LB_DOMAIN}/anything | head -5"
+echo "    curl -si ${_RUN_URL}/api/v2/ping | head -10"
 echo ""
