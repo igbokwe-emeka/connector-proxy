@@ -6,7 +6,7 @@ set -euo pipefail
 # wrapper resolves to by default. Override CLOUDSDK_PYTHON with the real
 # python.exe so gcloud works reliably in subshells. No-op on Linux/macOS.
 if [[ "$(uname -s)" =~ ^(MINGW|MSYS) ]]; then
-  export CLOUDSDK_PYTHON="$(cygpath -w "${HOME}")/AppData/Local/Microsoft/WindowsApps/python.exe"
+  export CLOUDSDK_PYTHON="$(cygpath -w "${HOME}")/AppData/Local/Python/bin/python.exe"
 fi
 # ──────────────────────────────────────────────────────────────────────────────
 
