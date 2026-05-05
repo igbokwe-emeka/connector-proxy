@@ -83,6 +83,9 @@ set -a; source "${ENV_FILE}"; set +a
 : "${AR_REPO:?AR_REPO must be set in .env}"
 : "${PROXY_SECRET_PATH:?PROXY_SECRET_PATH must be set in .env — run: openssl rand -hex 16}"
 : "${LB_DOMAIN:?LB_DOMAIN must be set in .env — domain name that will front the Global LB}"
+# CLOUD_DNS_ZONE is optional — if set, the script creates the DNS A record automatically.
+# If unset, the A record must be created manually before the SSL cert can provision.
+CLOUD_DNS_ZONE="${CLOUD_DNS_ZONE:-}"
 # ──────────────────────────────────────────────────────────────────────────────
 
 _IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/proxy:latest"
@@ -261,7 +264,33 @@ else
 fi
 _LB_IP=$(gcloud compute addresses describe "${CLOUD_RUN_SERVICE_NAME}-lb-ip" \
     --global --project="${PROJECT_ID}" --format="value(address)")
-echo "  LB IP: ${_LB_IP} → point ${LB_DOMAIN} A record here"
+echo "  LB IP: ${_LB_IP}"
+
+# ── Step 9b: DNS A record (automated via Cloud DNS if CLOUD_DNS_ZONE is set) ──
+# If CLOUD_DNS_ZONE is set the script creates (or updates) the DNS A record that
+# points LB_DOMAIN at the LB IP. The managed SSL certificate (Step 10) will not
+# provision until this record resolves publicly.
+echo ""
+echo "=== Step 9b: DNS A record for ${LB_DOMAIN} ==="
+if [[ -n "${CLOUD_DNS_ZONE}" ]]; then
+  _DNS_NAME="${LB_DOMAIN}."
+  if gcloud dns record-sets describe "${_DNS_NAME}" \
+      --zone="${CLOUD_DNS_ZONE}" --type=A \
+      --project="${PROJECT_ID}" &>/dev/null; then
+    echo "  Already exists: ${_DNS_NAME} A ${_LB_IP}"
+  else
+    gcloud dns record-sets create "${_DNS_NAME}" \
+        --zone="${CLOUD_DNS_ZONE}" \
+        --type=A \
+        --ttl=300 \
+        --rrdatas="${_LB_IP}" \
+        --project="${PROJECT_ID}"
+    echo "  Created: ${_DNS_NAME} A ${_LB_IP} (TTL 300)"
+  fi
+else
+  echo "  CLOUD_DNS_ZONE not set — create this DNS record manually before the SSL cert can provision:"
+  echo "    ${LB_DOMAIN}  →  ${_LB_IP}  (A record, TTL 300)"
+fi
 
 # ── Step 10: Google-managed SSL certificate ───────────────────────────────────
 # Google provisions and auto-renews the cert once LB_DOMAIN's A record
@@ -395,8 +424,13 @@ echo "║"
 echo "║  Static outbound IP (allowlist in Snowflake):"
 echo "║    ${NAT_IP_ADDRESS}"
 echo "║"
-echo "║  Point your DNS A record:"
-echo "║    ${LB_DOMAIN}  →  ${_LB_IP}"
+if [[ -n "${CLOUD_DNS_ZONE}" ]]; then
+  echo "║  DNS A record created automatically in zone: ${CLOUD_DNS_ZONE}"
+  echo "║    ${LB_DOMAIN}  →  ${_LB_IP}"
+else
+  echo "║  ACTION REQUIRED — create DNS A record:"
+  echo "║    ${LB_DOMAIN}  →  ${_LB_IP}"
+fi
 echo "║"
 echo "║  In Gemini Enterprise → connector configuration:"
 echo "║    Endpoint URL: https://${LB_DOMAIN}/${PROXY_SECRET_PATH}/"

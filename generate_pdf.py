@@ -368,6 +368,7 @@ env_vars = [
     ["AR_REPO", "snowflake-proxy", "Artifact Registry Docker repository name"],
     ["PROXY_SECRET_PATH", "openssl rand -hex 16", "Random hex secret embedded in the URL path"],
     ["LB_DOMAIN", "proxy.yourdomain.com", "Domain name for the Global LB (you must control DNS)"],
+    ["CLOUD_DNS_ZONE", "my-zone-name", "(Optional) Cloud DNS managed zone that controls LB_DOMAIN. If set, the script creates the DNS A record automatically in Step 9b. Leave blank to manage DNS manually."],
 ]
 et = Table(env_vars, colWidths=[4.5*cm, 4.8*cm, W - 13.4*cm])
 et.setStyle(TableStyle([
@@ -615,7 +616,7 @@ story += step_box("9", "Reserve Global Static IP (Load Balancer)", [
     Paragraph(
         "Reserve a <b>global</b> static IP for the HTTPS Load Balancer. This must be "
         "global (not regional) — Global HTTPS Load Balancers require a global address. "
-        "This is the IP your DNS A record will point to.",
+        "This is the IP the DNS A record will point to.",
         S["body"]),
     code_block("""\
 gcloud compute addresses create <CLOUD_RUN_SERVICE_NAME>-lb-ip \\
@@ -627,7 +628,45 @@ gcloud compute addresses describe <CLOUD_RUN_SERVICE_NAME>-lb-ip \\
     --global \\
     --project=<PROJECT_ID> \\
     --format="value(address)" """),
-    success_box("Record the LB IP address — you will create a DNS A record pointing LB_DOMAIN to this IP (Section 6.1). The SSL certificate (Step 10) will not provision until DNS propagates."),
+    success_box("Record the LB IP address — it is used in Step 9b to create the DNS A record."),
+])
+
+# ── Step 9b ───────────────────────────────────────────────────────────────────
+story += step_box("9b", "Create DNS A Record for LB_DOMAIN", [
+    Paragraph(
+        "Create a DNS A record pointing <b>LB_DOMAIN</b> at the LB IP from Step 9. "
+        "The Google-managed SSL certificate (Step 10) will remain in PROVISIONING status "
+        "until this record resolves publicly.",
+        S["body"]),
+    Paragraph("<b>Option 1 — Automated (Cloud DNS zone in the same GCP project):</b>", S["h3"]),
+    Paragraph(
+        "If LB_DOMAIN is managed by a Cloud DNS zone in the same project, set "
+        "<b>CLOUD_DNS_ZONE</b> in .env. The setup script creates the record automatically "
+        "in Step 9b. No manual action required.",
+        S["body"]),
+    code_block("""\
+# Automated — done by setup_psc_proxy.sh when CLOUD_DNS_ZONE is set
+gcloud dns record-sets create <LB_DOMAIN>. \\
+    --zone=<CLOUD_DNS_ZONE> \\
+    --type=A \\
+    --ttl=300 \\
+    --rrdatas=<LB_IP> \\
+    --project=<PROJECT_ID>"""),
+    Paragraph("<b>Option 2 — Manual (external DNS provider):</b>", S["h3"]),
+    Paragraph(
+        "If LB_DOMAIN is managed outside GCP, create the record in your DNS provider's console:",
+        S["body"]),
+    kv_table([
+        [Paragraph("<b>Type</b>", S["note"]),  Paragraph("A", S["note"])],
+        [Paragraph("<b>Name</b>", S["note"]),  Paragraph("<LB_DOMAIN>", S["note"])],
+        [Paragraph("<b>Value</b>", S["note"]), Paragraph("<LB IP from Step 9>", S["note"])],
+        [Paragraph("<b>TTL</b>", S["note"]),   Paragraph("300", S["note"])],
+    ], col_widths=[2.5*cm, W - 7.0*cm]),
+    Spacer(1, 0.2*cm),
+    Paragraph("Verify propagation:", S["body"]),
+    code_block("nslookup <LB_DOMAIN>"),
+    note_box("Do not proceed to Step 10 until nslookup returns the correct LB IP. "
+             "The SSL certificate will not provision until DNS is live."),
 ])
 
 # ── Step 10 ───────────────────────────────────────────────────────────────────
@@ -635,7 +674,7 @@ story += step_box("10", "Create Google-Managed SSL Certificate", [
     Paragraph(
         "Create a Google-managed SSL certificate for LB_DOMAIN. Google automatically "
         "provisions and renews the certificate once the DNS A record for LB_DOMAIN "
-        "resolves to the LB IP (Step 9). Provisioning typically takes ~15 minutes "
+        "resolves to the LB IP (Step 9b). Provisioning typically takes ~15 minutes "
         "after DNS propagates.",
         S["body"]),
     code_block("""\
@@ -649,7 +688,7 @@ gcloud compute ssl-certificates describe <CLOUD_RUN_SERVICE_NAME>-cert \\
     --global \\
     --project=<PROJECT_ID> \\
     --format="value(managed.status,managed.domainStatus)" """),
-    note_box("Status will show PROVISIONING until DNS is configured and propagated. Create the DNS record (Section 6.1) before proceeding, then wait for ACTIVE status."),
+    note_box("Status shows PROVISIONING until DNS propagates. Wait for ACTIVE before testing the endpoint."),
 ])
 
 # ── Step 11 ───────────────────────────────────────────────────────────────────
@@ -762,15 +801,19 @@ story += [
     Paragraph("6. Post-Provisioning Configuration", S["h1"]),
     hr(),
     Paragraph(
-        "Complete these steps after all 14 provisioning steps succeed. "
-        "These are manual actions outside of the automated script.",
+        "Complete these steps after all provisioning steps succeed.",
         S["body"]),
     Spacer(1, 0.3*cm),
 
     Paragraph("6.1  DNS A Record", S["h2"]),
     Paragraph(
-        "Create a DNS A record mapping your LB_DOMAIN to the global LB IP reserved in Step 9. "
-        "The SSL certificate will remain in PROVISIONING status until this record propagates.",
+        "If <b>CLOUD_DNS_ZONE</b> was set in .env, the DNS A record was created automatically "
+        "in Step 9b — no action needed here. Verify with:",
+        S["body"]),
+    code_block("nslookup <LB_DOMAIN>"),
+    Paragraph(
+        "If CLOUD_DNS_ZONE was not set, create the A record manually in your DNS provider "
+        "before the SSL certificate can provision:",
         S["body"]),
 ]
 dns_data = [
@@ -919,7 +962,8 @@ summary = [
     ["6",  "proxy:latest",                     "Docker Image",         "Regional", "nginx proxy container built by Cloud Build"],
     ["7",  "<VPC_CONNECTOR_NAME>",             "VPC Connector",        "Regional", "Bridges Cloud Run egress into VPC"],
     ["8",  "<CLOUD_RUN_SERVICE_NAME>",         "Cloud Run Service",    "Regional", "nginx proxy; ingress locked to LB only"],
-    ["9",  "<CLOUD_RUN_SERVICE_NAME>-lb-ip",   "Global IP",            "Global",   "Front-door IP; DNS A record target"],
+    ["9",  "<CLOUD_RUN_SERVICE_NAME>-lb-ip",   "Global IP",            "Global",   "Front-door IP; DNS A record points here"],
+    ["9b", "<LB_DOMAIN>",                     "DNS A Record",         "Global",   "Auto-created if CLOUD_DNS_ZONE set; else manual"],
     ["10", "<CLOUD_RUN_SERVICE_NAME>-cert",    "SSL Certificate",      "Global",   "TLS for LB_DOMAIN; auto-renewed"],
     ["11", "<CLOUD_RUN_SERVICE_NAME>-neg",     "Serverless NEG",       "Regional", "Connects Global LB to Cloud Run"],
     ["12", "<CLOUD_RUN_SERVICE_NAME>-backend", "Backend Service",      "Global",   "LB backend; carries Cloud Armor policy"],

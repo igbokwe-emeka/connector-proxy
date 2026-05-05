@@ -35,6 +35,7 @@ Snowflake  (account.snowflakecomputing.com:443)
 - A dedicated `/28` subnet for the VPC connector (no other resources in it)
 - A Cloud Router + NAT already configured on that subnet, **or** let the script create them
 - No local Docker required — the image is built in the cloud via Cloud Build
+- A domain name you control for `LB_DOMAIN`. If the domain is managed by a **Cloud DNS zone in the same project**, set `CLOUD_DNS_ZONE` and the script creates the A record automatically. Otherwise create the A record manually.
 
 ## Setup
 
@@ -55,7 +56,8 @@ Snowflake  (account.snowflakecomputing.com:443)
    | `NAT_GATEWAY_NAME` | Cloud NAT name (created if it doesn't exist) |
    | `SNOWFLAKE_HOST` | Your Snowflake account hostname (e.g. `xy12345.snowflakecomputing.com`) |
    | `PROXY_SECRET_PATH` | Secret URL path segment — generate with `openssl rand -hex 16` |
-   | `LB_DOMAIN` | Domain name that will front the Global Load Balancer (e.g. `proxy.yourdomain.com`) |
+   | `LB_DOMAIN` | Domain name that will front the Global Load Balancer |
+   | `CLOUD_DNS_ZONE` | *(Optional)* Cloud DNS managed zone name for `LB_DOMAIN`. If set, the script creates the DNS A record automatically. |
 
 2. Run the provisioning script:
 
@@ -70,7 +72,7 @@ Snowflake  (account.snowflakecomputing.com:443)
    | Output | Where to use it |
    |---|---|
    | **LB endpoint URL** (`https://<LB_DOMAIN>/<PROXY_SECRET_PATH>/`) | Gemini Enterprise connector → Endpoint URL |
-   | **LB global IP** | DNS A record for `LB_DOMAIN` — point here and wait for propagation |
+   | **DNS status** | If `CLOUD_DNS_ZONE` is set, the A record is created automatically. Otherwise create it manually. |
    | **Static egress IP** | Snowflake network policy (see below) |
 
 4. Allowlist the static IP in Snowflake:
@@ -89,8 +91,9 @@ Snowflake  (account.snowflakecomputing.com:443)
 | Artifact Registry repo | Stores the nginx proxy Docker image |
 | Cloud Run service | nginx proxy; ingress locked to LB only; all egress via VPC connector |
 | Serverless VPC Access Connector | Bridges Cloud Run egress into the VPC for Cloud NAT |
-| Global static IP (LB) | Front-door IP for the load balancer; point your DNS A record here |
-| Google-managed SSL certificate | TLS for `LB_DOMAIN`; auto-provisioned, auto-renewed |
+| Global static IP (LB) | Front-door IP for the load balancer |
+| DNS A record | Maps `LB_DOMAIN` to the LB IP — created automatically if `CLOUD_DNS_ZONE` is set |
+| Google-managed SSL certificate | TLS for `LB_DOMAIN`; auto-provisioned once DNS resolves, auto-renewed |
 | Serverless NEG | Connects the Global LB to the Cloud Run service |
 | Global HTTPS Load Balancer | Terminates TLS; routes to Cloud Run via Serverless NEG |
 | Cloud Armor security policy | Blocks all source IPs that are not Google Cloud infrastructure |
@@ -101,7 +104,7 @@ The VPC connector is created using `--subnet` (a named `/28` subnet you provide)
 
 | File | Purpose |
 |---|---|
-| [proxy/nginx.conf.template](proxy/nginx.conf.template) | nginx reverse proxy config; `$SNOWFLAKE_HOST` and `$SNOWFLAKE_PORT` substituted at container startup |
+| [proxy/nginx.conf.template](proxy/nginx.conf.template) | nginx reverse proxy config; `$SNOWFLAKE_HOST`, `$SNOWFLAKE_PORT`, and `$PROXY_SECRET_PATH` substituted at container startup |
 | [proxy/entrypoint.sh](proxy/entrypoint.sh) | Runs `envsubst` on the config template then starts nginx |
 | [proxy/Dockerfile](proxy/Dockerfile) | Builds the nginx:alpine image |
 
@@ -131,7 +134,7 @@ Two independent gates protect the proxy:
 
 ### Strategy B — Cloud Armor (network layer)
 
-A Cloud Armor policy is attached to the Global Load Balancer backend. It allows only source IPs from Google Cloud infrastructure (where Gemini runs) and denies everything else with HTTP 403. The Cloud Run service ingress is set to `internal-and-cloud-load-balancing`, so the raw Cloud Run URL is unreachable from the public internet — all traffic must pass through the LB.
+A Cloud Armor policy is attached to the Global Load Balancer backend. It uses the Google Threat Intelligence feed `iplist-public-clouds-gcp` to allow only GCP source IPs and denies everything else with HTTP 403. The Cloud Run service ingress is set to `internal-and-cloud-load-balancing`, so the raw Cloud Run URL is unreachable from the public internet — all traffic must pass through the LB.
 
 To tighten the rule further, inspect Cloud Run logs for Gemini-specific headers (e.g. `X-Goog-Api-Client`) and add a header-match rule at priority 999.
 
