@@ -12,11 +12,12 @@ The Gemini Enterprise connector requires a publicly resolvable URL and uses a dy
 Gemini Enterprise connector
         │  HTTPS  →  https://<LB_DOMAIN>/...
         ▼
-Cloud Armor  (blocks non-Google-Cloud source IPs)
+Cloud Armor  (GCP source IPs allowed; /oauth/token-request always allowed)
         ▼
 Global HTTPS Load Balancer  →  Serverless NEG
         ▼
 Cloud Run  (nginx — proxies all traffic to Snowflake)
+        │  --ingress=internal-and-cloud-load-balancing
         │  --vpc-egress=all-traffic  →  Serverless VPC Access Connector
         ▼
 Cloud NAT  ──►  Static External IP
@@ -25,7 +26,7 @@ Cloud NAT  ──►  Static External IP
 Snowflake  (account.snowflakecomputing.com:443)
 ```
 
-`--vpc-egress=all-traffic` forces every outbound byte from Cloud Run through the VPC connector and therefore through Cloud NAT, ensuring Snowflake always sees the static IP. Cloud Run ingress is restricted to `internal-and-cloud-load-balancing` — the raw Cloud Run URL is not publicly reachable.
+`--vpc-egress=all-traffic` forces every outbound byte from Cloud Run through the VPC connector and therefore through Cloud NAT, ensuring Snowflake always sees the static IP. Cloud Run ingress is restricted to `internal-and-cloud-load-balancing` — the raw Cloud Run URL is not publicly reachable from the internet.
 
 ## Prerequisites
 
@@ -95,7 +96,7 @@ Snowflake  (account.snowflakecomputing.com:443)
 | Google-managed SSL certificate | TLS for `LB_DOMAIN`; auto-provisioned once DNS resolves, auto-renewed |
 | Serverless NEG | Connects the Global LB to the Cloud Run service |
 | Global HTTPS Load Balancer | Terminates TLS; routes to Cloud Run via Serverless NEG |
-| Cloud Armor security policy | Blocks all source IPs that are not Google Cloud infrastructure |
+| Cloud Armor security policy | Blocks non-GCP source IPs; always allows `/oauth/token-request` |
 
 ## Proxy files
 
@@ -124,6 +125,16 @@ LIMIT 5;
 
 ## Cloud Armor
 
-A Cloud Armor policy is attached to the Global Load Balancer backend. It uses the Google Threat Intelligence feed `iplist-public-clouds-gcp` to allow only GCP source IPs and denies everything else with HTTP 403. Requires Cloud Armor Enterprise on the project.
+A Cloud Armor policy is attached to the Global Load Balancer backend. Requires **Cloud Armor Enterprise** on the project.
+
+Rules (evaluated lowest-priority-number first):
+
+| Priority | Match | Action |
+|---|---|---|
+| 800 | `request.path.startsWith('/oauth/token-request')` | allow |
+| 1000 | `evaluateThreatIntelligence('iplist-public-clouds-gcp')` | allow |
+| default | everything else | deny-403 |
+
+Rule 800 exists because Gemini Enterprise's server-to-server OAuth token exchange originates from Google Workspace backend infrastructure whose IPs are not in the GCP public cloud IP list. The token endpoint requires a valid Snowflake-issued auth code, so opening this path is safe.
 
 The Cloud Run service ingress is set to `internal-and-cloud-load-balancing`, so the raw Cloud Run URL is unreachable from the public internet — all traffic must pass through the LB and Cloud Armor.

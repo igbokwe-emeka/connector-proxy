@@ -14,12 +14,12 @@ fi
 #   Gemini Enterprise connector
 #       │  HTTPS  →  https://<LB_DOMAIN>/...
 #       ▼
-#   Cloud Armor  (blocks non-Google-Cloud source IPs)
+#   Cloud Armor  (GCP IPs allowed; /oauth/token-request always allowed)
 #       ▼
 #   Global HTTPS Load Balancer  →  Serverless NEG
 #       ▼
 #   Cloud Run  (nginx — proxies all traffic to Snowflake)
-#       │  --ingress=internal-and-cloud-load-balancing
+#       │  --ingress=internal-and-cloud-load-balancing  (direct URL blocked)
 #       │  --vpc-egress=all-traffic
 #       ▼
 #   Serverless VPC Access Connector
@@ -302,30 +302,47 @@ else
 fi
 
 # ── Step 14: Cloud Armor security policy ──────────────────────────────────────
+# Requires Cloud Armor Enterprise on the project.
+# Rules (evaluated in priority order, lowest number first):
+#   800  — allow /oauth/token-request unconditionally: Gemini's server-to-server
+#           token exchange may originate from Google Workspace infrastructure
+#           whose IPs are not in the GCP public cloud IP list.
+#   1000 — allow all Google Cloud public IPs (iplist-public-clouds-gcp).
+#   default — deny-403 everything else.
 echo ""
 echo "=== Step 14: Cloud Armor security policy ==="
 if ! gcloud compute security-policies describe "${CLOUD_RUN_SERVICE_NAME}-armor" \
     --project="${PROJECT_ID}" &>/dev/null; then
   gcloud compute security-policies create "${CLOUD_RUN_SERVICE_NAME}-armor" \
-      --description="Allow GCP source IPs only via Threat Intelligence feed" \
+      --description="Allow GCP source IPs; always allow OAuth token-request path" \
       --project="${PROJECT_ID}"
+  # Rule 800: token endpoint must always reach Cloud Run (server-to-server exchange)
+  gcloud compute security-policies rules create 800 \
+      --security-policy="${CLOUD_RUN_SERVICE_NAME}-armor" \
+      --expression="request.path.startsWith('/oauth/token-request')" \
+      --action=allow \
+      --project="${PROJECT_ID}"
+  # Rule 1000: allow all GCP public cloud source IPs
   gcloud compute security-policies rules create 1000 \
       --security-policy="${CLOUD_RUN_SERVICE_NAME}-armor" \
       --expression="evaluateThreatIntelligence('iplist-public-clouds-gcp')" \
       --action=allow \
       --project="${PROJECT_ID}"
+  # Default rule: deny everything else
   gcloud compute security-policies rules update 2147483647 \
       --security-policy="${CLOUD_RUN_SERVICE_NAME}-armor" \
       --action=deny-403 \
       --project="${PROJECT_ID}"
-  gcloud compute backend-services update "${CLOUD_RUN_SERVICE_NAME}-backend" \
-      --global \
-      --security-policy="${CLOUD_RUN_SERVICE_NAME}-armor" \
-      --project="${PROJECT_ID}"
-  echo "  Created and attached: ${CLOUD_RUN_SERVICE_NAME}-armor"
+  echo "  Created: ${CLOUD_RUN_SERVICE_NAME}-armor (rules 800, 1000, default-deny)"
 else
   echo "  Already exists: ${CLOUD_RUN_SERVICE_NAME}-armor"
 fi
+# Attach policy to backend (idempotent — safe to re-run)
+gcloud compute backend-services update "${CLOUD_RUN_SERVICE_NAME}-backend" \
+    --global \
+    --security-policy="${CLOUD_RUN_SERVICE_NAME}-armor" \
+    --project="${PROJECT_ID}"
+echo "  Attached to backend: ${CLOUD_RUN_SERVICE_NAME}-backend"
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
@@ -350,7 +367,7 @@ echo "║    Authorization URL: https://${LB_DOMAIN}/oauth/authorize"
 echo "║    Token URL:         https://${LB_DOMAIN}/oauth/token-request"
 echo "║"
 echo "║  Direct Cloud Run URL is ingress-restricted (not publicly reachable)."
-echo "║  Cloud Armor blocks all non-Google-Cloud source IPs."
+echo "║  Cloud Armor: GCP IPs allowed; /oauth/token-request always allowed."
 echo "║"
 echo "╚══════════════════════════════════════════════════════════════════════╝"
 echo ""
