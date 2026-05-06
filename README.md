@@ -10,12 +10,10 @@ The Gemini Enterprise connector requires a publicly resolvable URL and uses a dy
 
 ```
 Gemini Enterprise connector
-        │  HTTPS  →  https://<LB_DOMAIN>/...
-        ▼
-Global HTTPS Load Balancer  →  Serverless NEG
+        │  HTTPS  →  https://<cloud-run-url>/...
         ▼
 Cloud Run  (nginx — proxies all traffic to Snowflake)
-        │  --ingress=internal-and-cloud-load-balancing
+        │  --ingress=all
         │  --vpc-egress=all-traffic  →  Serverless VPC Access Connector
         ▼
 Cloud NAT  ──►  Static External IP
@@ -24,7 +22,7 @@ Cloud NAT  ──►  Static External IP
 Snowflake  (account.snowflakecomputing.com:443)
 ```
 
-`--vpc-egress=all-traffic` forces every outbound byte from Cloud Run through the VPC connector and therefore through Cloud NAT, ensuring Snowflake always sees the static IP. Cloud Run ingress is restricted to `internal-and-cloud-load-balancing` — the raw Cloud Run URL is not publicly reachable from the internet.
+`--vpc-egress=all-traffic` forces every outbound byte from Cloud Run through the VPC connector and therefore through Cloud NAT, ensuring Snowflake always sees the static IP.
 
 ## Prerequisites
 
@@ -34,7 +32,6 @@ Snowflake  (account.snowflakecomputing.com:443)
 - A dedicated `/28` subnet for the VPC connector (no other resources in it)
 - A Cloud Router + NAT already configured on that subnet, **or** let the script create them
 - No local Docker required — the image is built in the cloud via Cloud Build
-- A domain name you control for `LB_DOMAIN`. If the domain is managed by a **Cloud DNS zone in the same project**, set `CLOUD_DNS_ZONE` and the script creates the A record automatically.
 
 ## Setup
 
@@ -54,8 +51,6 @@ Snowflake  (account.snowflakecomputing.com:443)
    | `NAT_ROUTER_NAME` | Cloud Router name (created if it doesn't exist) |
    | `NAT_GATEWAY_NAME` | Cloud NAT name (created if it doesn't exist) |
    | `SNOWFLAKE_HOST` | Your Snowflake account hostname (e.g. `xy12345.snowflakecomputing.com`) |
-   | `LB_DOMAIN` | Domain name that will front the Global Load Balancer |
-   | `CLOUD_DNS_ZONE` | *(Optional)* Cloud DNS managed zone name for `LB_DOMAIN`. If set, the script creates the DNS A record automatically. |
 
 2. Run the provisioning script:
 
@@ -69,9 +64,9 @@ Snowflake  (account.snowflakecomputing.com:443)
 
    | Field | Value |
    |---|---|
-   | **MCP URL** | `https://<LB_DOMAIN>/` |
-   | **Authorization URL** | `https://<LB_DOMAIN>/oauth/authorize` |
-   | **Token URL** | `https://<LB_DOMAIN>/oauth/token-request` |
+   | **MCP URL** | `https://<cloud-run-url>/` |
+   | **Authorization URL** | `https://<cloud-run-url>/oauth/authorize` |
+   | **Token URL** | `https://<cloud-run-url>/oauth/token-request` |
 
 4. Allowlist the static IP in Snowflake:
 
@@ -87,13 +82,8 @@ Snowflake  (account.snowflakecomputing.com:443)
 | Static external IP (regional) | Fixed egress address for Snowflake's allowlist |
 | Cloud Router + NAT | Routes VPC connector egress through the static IP |
 | Artifact Registry repo | Stores the nginx proxy Docker image |
-| Cloud Run service | nginx proxy; ingress locked to LB only; all egress via VPC connector |
+| Cloud Run service | nginx proxy; all egress via VPC connector |
 | Serverless VPC Access Connector | Bridges Cloud Run egress into the VPC for Cloud NAT |
-| Global static IP (LB) | Front-door IP for the load balancer |
-| DNS A record | Maps `LB_DOMAIN` to the LB IP — created automatically if `CLOUD_DNS_ZONE` is set |
-| Google-managed SSL certificate | TLS for `LB_DOMAIN`; auto-provisioned once DNS resolves, auto-renewed |
-| Serverless NEG | Connects the Global LB to the Cloud Run service |
-| Global HTTPS Load Balancer | Terminates TLS; routes to Cloud Run via Serverless NEG |
 
 ## Proxy files
 
@@ -107,10 +97,7 @@ Snowflake  (account.snowflakecomputing.com:443)
 
 ```bash
 # Proxy should forward to Snowflake (any Snowflake response is a pass)
-curl -si https://<LB_DOMAIN>/api/v2/ping | head -10
-
-# Cloud Armor gate: direct Cloud Run URL must be unreachable
-curl -si https://<cloud-run-url>/ | head -5
+curl -si https://<cloud-run-url>/api/v2/ping | head -10
 
 # Confirm Snowflake sees the static IP (run in Snowsight after a test query)
 SELECT client_net_address, user_name, start_time
@@ -122,12 +109,11 @@ LIMIT 5;
 
 ## Security model
 
-Cloud Armor Enterprise is **not used**. When attached to this LB, it causes Gemini Enterprise's backend to call `POST /oauth/authorize` (rejected by Snowflake with 405) instead of `POST /oauth/token-request`, breaking the OAuth token exchange. This occurs regardless of which Cloud Armor rules allow the traffic — confirmed by LB access logs comparing behaviour with and without Cloud Armor attached.
-
-Security layers in use:
+Security relies on two layers without requiring a Global Load Balancer:
 
 | Layer | How it protects |
 |---|---|
-| Cloud Run `--ingress=internal-and-cloud-load-balancing` | Direct Cloud Run URL unreachable from the public internet |
 | Snowflake OAuth | Valid client credentials required to initiate any flow |
-| Snowflake network policy | Only the static egress IP `34.68.22.120` is allowlisted — requests from any other IP are rejected by Snowflake |
+| Snowflake network policy | Only the static egress IP is allowlisted — requests from any other IP are rejected by Snowflake |
+
+**Note on Global Load Balancer + Cloud Armor:** A Global HTTPS LB was evaluated and removed. When a custom LB domain is used, Gemini Enterprise's backend switches its OAuth token exchange from `POST /oauth/token-request` (correct) to `POST /oauth/authorize` (rejected by Snowflake with 405), breaking the OAuth flow. This behaviour occurs regardless of Cloud Armor rules and is caused by how Gemini's backend interprets the custom domain vs the Cloud Run URL. Using the Cloud Run URL directly avoids this entirely.
