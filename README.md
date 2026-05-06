@@ -96,7 +96,7 @@ Snowflake  (account.snowflakecomputing.com:443)
 | Google-managed SSL certificate | TLS for `LB_DOMAIN`; auto-provisioned once DNS resolves, auto-renewed |
 | Serverless NEG | Connects the Global LB to the Cloud Run service |
 | Global HTTPS Load Balancer | Terminates TLS; routes to Cloud Run via Serverless NEG |
-| Cloud Armor security policy | Blocks non-GCP source IPs; always allows `/oauth/token-request` |
+| Cloud Armor security policy | Blocks non-GCP source IPs; always allows `/oauth/*` paths |
 
 ## Proxy files
 
@@ -131,10 +131,10 @@ Rules (evaluated lowest-priority-number first):
 
 | Priority | Match | Action |
 |---|---|---|
-| 800 | `request.path.startsWith('/oauth/token-request')` | allow |
+| 800 | `request.path.startsWith('/oauth/')` | allow |
 | 1000 | `evaluateThreatIntelligence('iplist-public-clouds-gcp')` | allow |
 | default | everything else | deny-403 |
 
-Rule 800 exists because Gemini Enterprise's server-to-server OAuth token exchange originates from Google Workspace backend infrastructure whose IPs are not in the GCP public cloud IP list. The token endpoint requires a valid Snowflake-issued auth code, so opening this path is safe.
+Rule 800 exists because Gemini Enterprise's backend (Google ASN 15169, not in the GCP public cloud IP list) makes server-side POSTs to both `/oauth/authorize` and `/oauth/token-request`. All `/oauth/*` paths require valid Snowflake credentials to do anything useful, so allowing them by path is safe.
 
 The Cloud Run service ingress is set to `internal-and-cloud-load-balancing`, so the raw Cloud Run URL is unreachable from the public internet — all traffic must pass through the LB and Cloud Armor.

@@ -304,9 +304,10 @@ fi
 # ── Step 14: Cloud Armor security policy ──────────────────────────────────────
 # Requires Cloud Armor Enterprise on the project.
 # Rules (evaluated in priority order, lowest number first):
-#   800  — allow /oauth/token-request unconditionally: Gemini's server-to-server
-#           token exchange may originate from Google Workspace infrastructure
-#           whose IPs are not in the GCP public cloud IP list.
+#   800  — allow all /oauth/* paths unconditionally: Gemini's backend (ASN 15169,
+#           not in iplist-public-clouds-gcp) makes server-side POSTs to both
+#           /oauth/authorize and /oauth/token-request. All OAuth paths require
+#           valid Snowflake credentials so opening them by path is safe.
 #   1000 — allow all Google Cloud public IPs (iplist-public-clouds-gcp).
 #   default — deny-403 everything else.
 echo ""
@@ -316,10 +317,11 @@ if ! gcloud compute security-policies describe "${CLOUD_RUN_SERVICE_NAME}-armor"
   gcloud compute security-policies create "${CLOUD_RUN_SERVICE_NAME}-armor" \
       --description="Allow GCP source IPs; always allow OAuth token-request path" \
       --project="${PROJECT_ID}"
-  # Rule 800: token endpoint must always reach Cloud Run (server-to-server exchange)
+  # Rule 800: all OAuth paths must reach Cloud Run — Gemini's backend (ASN 15169)
+  # POSTs to /oauth/authorize and /oauth/token-request from non-GCP Google IPs
   gcloud compute security-policies rules create 800 \
       --security-policy="${CLOUD_RUN_SERVICE_NAME}-armor" \
-      --expression="request.path.startsWith('/oauth/token-request')" \
+      --expression="request.path.startsWith('/oauth/')" \
       --action=allow \
       --project="${PROJECT_ID}"
   # Rule 1000: allow all GCP public cloud source IPs
