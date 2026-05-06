@@ -8,13 +8,18 @@ fi
 # ──────────────────────────────────────────────────────────────────────────────
 
 # =============================================================================
-# Snowflake Connector Proxy — Cloud Run + Global LB + Cloud Armor
+# Snowflake Connector Proxy — Cloud Run + Global LB
 # =============================================================================
+# NOTE: Cloud Armor Enterprise is NOT used. When attached to this LB, it causes
+# Gemini Enterprise's backend to call POST /oauth/authorize (rejected by
+# Snowflake with 405) instead of POST /oauth/token-request. This behaviour
+# occurs regardless of which Cloud Armor rules allow the traffic — the LB's
+# session handling changes when Cloud Armor is present. Security relies on
+# Cloud Run ingress=internal-and-cloud-load-balancing instead.
+#
 # Traffic flow:
 #   Gemini Enterprise connector
 #       │  HTTPS  →  https://<LB_DOMAIN>/...
-#       ▼
-#   Cloud Armor  (GCP IPs allowed; /oauth/token-request always allowed)
 #       ▼
 #   Global HTTPS Load Balancer  →  Serverless NEG
 #       ▼
@@ -301,50 +306,17 @@ else
   echo "  Already exists: ${CLOUD_RUN_SERVICE_NAME}-urlmap"
 fi
 
-# ── Step 14: Cloud Armor security policy ──────────────────────────────────────
-# Requires Cloud Armor Enterprise on the project.
-# Rules (evaluated in priority order, lowest number first):
-#   800  — allow all /oauth/* paths unconditionally: Gemini's backend (ASN 15169,
-#           not in iplist-public-clouds-gcp) makes server-side POSTs to both
-#           /oauth/authorize and /oauth/token-request. All OAuth paths require
-#           valid Snowflake credentials so opening them by path is safe.
-#   1000 — allow all Google Cloud public IPs (iplist-public-clouds-gcp).
-#   default — deny-403 everything else.
+# ── Step 14: Cloud Armor — skipped ───────────────────────────────────────────
+# Cloud Armor Enterprise is incompatible with the Gemini Enterprise OAuth flow.
+# When attached, the LB's session behaviour changes in a way that causes
+# Gemini's backend to POST to /oauth/authorize (rejected by Snowflake with 405)
+# instead of /oauth/token-request, regardless of which rules allow the traffic.
+# Confirmed by LB access logs: without Cloud Armor Gemini uses /oauth/token-request;
+# with Cloud Armor it uses /oauth/authorize.
+# Security: Cloud Run ingress=internal-and-cloud-load-balancing blocks direct access.
 echo ""
-echo "=== Step 14: Cloud Armor security policy ==="
-if ! gcloud compute security-policies describe "${CLOUD_RUN_SERVICE_NAME}-armor" \
-    --project="${PROJECT_ID}" &>/dev/null; then
-  gcloud compute security-policies create "${CLOUD_RUN_SERVICE_NAME}-armor" \
-      --description="Allow GCP source IPs; always allow OAuth token-request path" \
-      --project="${PROJECT_ID}"
-  # Rule 800: all OAuth paths must reach Cloud Run — Gemini's backend (ASN 15169)
-  # POSTs to /oauth/authorize and /oauth/token-request from non-GCP Google IPs
-  gcloud compute security-policies rules create 800 \
-      --security-policy="${CLOUD_RUN_SERVICE_NAME}-armor" \
-      --expression="request.path.startsWith('/oauth/')" \
-      --action=allow \
-      --project="${PROJECT_ID}"
-  # Rule 1000: allow all GCP public cloud source IPs
-  gcloud compute security-policies rules create 1000 \
-      --security-policy="${CLOUD_RUN_SERVICE_NAME}-armor" \
-      --expression="evaluateThreatIntelligence('iplist-public-clouds-gcp')" \
-      --action=allow \
-      --project="${PROJECT_ID}"
-  # Default rule: deny everything else
-  gcloud compute security-policies rules update 2147483647 \
-      --security-policy="${CLOUD_RUN_SERVICE_NAME}-armor" \
-      --action=deny-403 \
-      --project="${PROJECT_ID}"
-  echo "  Created: ${CLOUD_RUN_SERVICE_NAME}-armor (rules 800, 1000, default-deny)"
-else
-  echo "  Already exists: ${CLOUD_RUN_SERVICE_NAME}-armor"
-fi
-# Attach policy to backend (idempotent — safe to re-run)
-gcloud compute backend-services update "${CLOUD_RUN_SERVICE_NAME}-backend" \
-    --global \
-    --security-policy="${CLOUD_RUN_SERVICE_NAME}-armor" \
-    --project="${PROJECT_ID}"
-echo "  Attached to backend: ${CLOUD_RUN_SERVICE_NAME}-backend"
+echo "=== Step 14: Cloud Armor — skipped (incompatible with Gemini Enterprise OAuth) ==="
+echo "  Security: Cloud Run ingress restriction + Snowflake OAuth + Snowflake network policy."
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
@@ -369,7 +341,7 @@ echo "║    Authorization URL: https://${LB_DOMAIN}/oauth/authorize"
 echo "║    Token URL:         https://${LB_DOMAIN}/oauth/token-request"
 echo "║"
 echo "║  Direct Cloud Run URL is ingress-restricted (not publicly reachable)."
-echo "║  Cloud Armor: GCP IPs allowed; /oauth/token-request always allowed."
+echo "║  Snowflake network policy allows only the static egress IP above."
 echo "║"
 echo "╚══════════════════════════════════════════════════════════════════════╝"
 echo ""

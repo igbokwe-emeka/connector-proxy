@@ -12,8 +12,6 @@ The Gemini Enterprise connector requires a publicly resolvable URL and uses a dy
 Gemini Enterprise connector
         │  HTTPS  →  https://<LB_DOMAIN>/...
         ▼
-Cloud Armor  (GCP source IPs allowed; /oauth/token-request always allowed)
-        ▼
 Global HTTPS Load Balancer  →  Serverless NEG
         ▼
 Cloud Run  (nginx — proxies all traffic to Snowflake)
@@ -96,7 +94,6 @@ Snowflake  (account.snowflakecomputing.com:443)
 | Google-managed SSL certificate | TLS for `LB_DOMAIN`; auto-provisioned once DNS resolves, auto-renewed |
 | Serverless NEG | Connects the Global LB to the Cloud Run service |
 | Global HTTPS Load Balancer | Terminates TLS; routes to Cloud Run via Serverless NEG |
-| Cloud Armor security policy | Blocks non-GCP source IPs; always allows `/oauth/*` paths |
 
 ## Proxy files
 
@@ -123,18 +120,14 @@ ORDER BY start_time DESC
 LIMIT 5;
 ```
 
-## Cloud Armor
+## Security model
 
-A Cloud Armor policy is attached to the Global Load Balancer backend. Requires **Cloud Armor Enterprise** on the project.
+Cloud Armor Enterprise is **not used**. When attached to this LB, it causes Gemini Enterprise's backend to call `POST /oauth/authorize` (rejected by Snowflake with 405) instead of `POST /oauth/token-request`, breaking the OAuth token exchange. This occurs regardless of which Cloud Armor rules allow the traffic — confirmed by LB access logs comparing behaviour with and without Cloud Armor attached.
 
-Rules (evaluated lowest-priority-number first):
+Security layers in use:
 
-| Priority | Match | Action |
-|---|---|---|
-| 800 | `request.path.startsWith('/oauth/')` | allow |
-| 1000 | `evaluateThreatIntelligence('iplist-public-clouds-gcp')` | allow |
-| default | everything else | deny-403 |
-
-Rule 800 exists because Gemini Enterprise's backend (Google ASN 15169, not in the GCP public cloud IP list) makes server-side POSTs to both `/oauth/authorize` and `/oauth/token-request`. All `/oauth/*` paths require valid Snowflake credentials to do anything useful, so allowing them by path is safe.
-
-The Cloud Run service ingress is set to `internal-and-cloud-load-balancing`, so the raw Cloud Run URL is unreachable from the public internet — all traffic must pass through the LB and Cloud Armor.
+| Layer | How it protects |
+|---|---|
+| Cloud Run `--ingress=internal-and-cloud-load-balancing` | Direct Cloud Run URL unreachable from the public internet |
+| Snowflake OAuth | Valid client credentials required to initiate any flow |
+| Snowflake network policy | Only the static egress IP `34.68.22.120` is allowlisted — requests from any other IP are rejected by Snowflake |
