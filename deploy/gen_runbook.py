@@ -12,7 +12,7 @@ from reportlab.platypus import (
     SimpleDocTemplate, Spacer, Table, TableStyle,
 )
 
-OUTPUT = os.path.join(os.path.dirname(__file__), "..", "Snowflake_Connector_Proxy_Admin_Runbook_new.pdf")
+OUTPUT = os.path.join(os.path.dirname(__file__), "..", "Snowflake_Connector_Proxy_Admin_Runbook.pdf")
 
 doc = SimpleDocTemplate(
     OUTPUT,
@@ -276,65 +276,11 @@ story += [
         ["Snowflake OAuth",          "Valid client credentials (client ID + secret) required to initiate any flow"],
         ["Snowflake network policy", "Only the static egress IP is allowlisted — all other source IPs are rejected"],
     ], col_widths=[5 * cm, 13.5 * cm]),
-    Spacer(1, 0.3 * cm),
-    Paragraph("Note on Global Load Balancer + Cloud Armor:", H3),
-    Paragraph(
-        "A Global HTTPS Load Balancer was evaluated and removed. When a custom LB domain is used, "
-        "Gemini Enterprise's backend switches its OAuth token exchange from "
-        "<font face='Courier'>POST /oauth/token-request</font> (correct) to "
-        "<font face='Courier'>POST /oauth/authorize</font> (rejected by Snowflake with 405). "
-        "This occurs regardless of Cloud Armor rules. Using the Cloud Run URL directly avoids this.",
-        BODY),
 ]
 
-# ── 10. Troubleshooting ───────────────────────────────────────────────────────
+# ── 10. Operational Reference ──────────────────────────────────────────────────
 story += [
-    Paragraph("10. Troubleshooting", H1), hr(),
-
-    Paragraph('10.1  "Failed to obtain refresh token"', H2),
-    Paragraph(
-        "The browser OAuth login succeeds but the connector cannot obtain a refresh token.",
-        BODY),
-    Paragraph(
-        "<b>Diagnosis:</b> Check Cloud Run logs for "
-        "<font face='Courier'>POST /oauth/token-request</font>. "
-        "If absent, the token exchange is not reaching the proxy — the Token URL is wrong.",
-        BODY),
-    Paragraph("<b>Fix:</b> Verify all three connector URLs use the exact Cloud Run URL:", BODY),
-    tbl([
-        ["Field",             "Correct value"],
-        ["Authorization URL", "https://<cloud-run-url>/oauth/authorize"],
-        ["Token URL",         "https://<cloud-run-url>/oauth/token-request"],
-        ["MCP URL",           "https://<cloud-run-url>/..."],
-    ], col_widths=[4.5 * cm, 14 * cm]),
-    Spacer(1, 0.2 * cm),
-
-    Paragraph("10.2  Token exchange reaches proxy but Snowflake returns an error", H2),
-    Paragraph(
-        "<font face='Courier'>POST /oauth/token-request</font> appears in logs with a non-200 status.",
-        BODY),
-    Paragraph("<b>Diagnosis:</b> Confirm Snowflake network policy includes the static egress IP:", BODY),
-    code("SHOW NETWORK POLICIES;"),
-    Paragraph("<b>Fix:</b>", BODY),
-    code(
-        "ALTER NETWORK POLICY <policy_name>\n"
-        "  ADD ALLOWED_IP_LIST = ('<static_ip>/32');"
-    ),
-
-    Paragraph("10.3  Connector stopped working after infrastructure change", H2),
-    tbl([
-        ["#", "Check",                                   "Command / Location"],
-        ["1",  "Cloud Run service is running",            "gcloud run services describe <service> --region=<region>"],
-        ["2",  "Static egress IP unchanged",              "gcloud compute addresses describe <nat-ip-name> --region=<region>"],
-        ["3",  "Snowflake network policy allows that IP", "SHOW NETWORK POLICIES; (Snowsight)"],
-        ["4",  "All three connector URLs correct",        "Gemini Enterprise console"],
-        ["5",  "Recent errors in logs",                   "gcloud logging read ... --freshness=30m"],
-    ], col_widths=[0.8 * cm, 5.5 * cm, 12.2 * cm]),
-]
-
-# ── 11. Operational Reference ──────────────────────────────────────────────────
-story += [
-    Paragraph("11. Operational Reference — igbokwe Deployment", H1), hr(),
+    Paragraph("10. Operational Reference — igbokwe Deployment", H1), hr(),
     tbl([
         ["Resource",              "Value"],
         ["GCP Project",           "igbokwe"],
