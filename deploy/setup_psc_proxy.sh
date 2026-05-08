@@ -8,17 +8,15 @@ fi
 # ──────────────────────────────────────────────────────────────────────────────
 
 # =============================================================================
-# Snowflake Connector Proxy — Cloud Run only (no Load Balancer)
+# Snowflake Connector Proxy — Cloud Run with Direct VPC Egress
 # =============================================================================
 # Traffic flow:
 #   Gemini Enterprise connector
 #       │  HTTPS  →  https://<cloud-run-url>/...
 #       ▼
 #   Cloud Run  (nginx — proxies all traffic to Snowflake)
-#       │  --ingress=all  (publicly reachable; Cloud Run IAM = unauthenticated)
-#       │  --vpc-egress=all-traffic
-#       ▼
-#   Serverless VPC Access Connector
+#       │  --ingress=all
+#       │  --vpc-egress=all-traffic  (Direct VPC Egress via --network/--subnet)
 #       ▼
 #   Cloud NAT  ──►  Static External IP  (allowlisted in Snowflake network policy)
 #       ▼
@@ -46,13 +44,12 @@ set -a; source "${ENV_FILE}"; set +a
 : "${PROJECT_ID:?PROJECT_ID must be set in .env}"
 : "${REGION:?REGION must be set in .env}"
 : "${VPC_NETWORK:?VPC_NETWORK must be set in .env}"
+: "${VPC_SUBNET:?VPC_SUBNET must be set in .env}"
 : "${SNOWFLAKE_HOST:?SNOWFLAKE_HOST must be set in .env}"
 : "${SNOWFLAKE_PORT:?SNOWFLAKE_PORT must be set in .env}"
 : "${NAT_IP_NAME:?NAT_IP_NAME must be set in .env}"
 : "${NAT_ROUTER_NAME:?NAT_ROUTER_NAME must be set in .env}"
 : "${NAT_GATEWAY_NAME:?NAT_GATEWAY_NAME must be set in .env}"
-: "${VPC_CONNECTOR_NAME:?VPC_CONNECTOR_NAME must be set in .env}"
-: "${VPC_CONNECTOR_SUBNET:?VPC_CONNECTOR_SUBNET must be set in .env}"
 : "${CLOUD_RUN_SERVICE_NAME:?CLOUD_RUN_SERVICE_NAME must be set in .env}"
 : "${AR_REPO:?AR_REPO must be set in .env}"
 # ──────────────────────────────────────────────────────────────────────────────
@@ -61,10 +58,10 @@ _IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/proxy:latest"
 _PROXY_DIR="${SCRIPT_DIR}/../proxy"
 
 echo ""
-echo "=== Snowflake Connector Proxy Setup (Cloud Run) ==="
+echo "=== Snowflake Connector Proxy Setup (Cloud Run + Direct VPC Egress) ==="
 echo "  Project:        ${PROJECT_ID}"
 echo "  Region:         ${REGION}"
-echo "  VPC:            ${VPC_NETWORK} (connector subnet: ${VPC_CONNECTOR_SUBNET})"
+echo "  VPC:            ${VPC_NETWORK} (subnet: ${VPC_SUBNET})"
 echo "  Snowflake host: ${SNOWFLAKE_HOST}:${SNOWFLAKE_PORT}"
 echo "  Image:          ${_IMAGE}"
 echo ""
@@ -74,7 +71,6 @@ echo "=== Step 1: Enabling required GCP APIs ==="
 gcloud services enable \
     compute.googleapis.com \
     run.googleapis.com \
-    vpcaccess.googleapis.com \
     artifactregistry.googleapis.com \
     cloudbuild.googleapis.com \
     --project="${PROJECT_ID}"
@@ -119,8 +115,8 @@ if ! gcloud compute routers nats describe "${NAT_GATEWAY_NAME}" \
       --router="${NAT_ROUTER_NAME}" \
       --region="${REGION}" --project="${PROJECT_ID}" \
       --nat-external-ip-pool="${NAT_IP_NAME}" \
-      --nat-custom-subnet-ip-ranges="${VPC_CONNECTOR_SUBNET}"
-  echo "  Created: ${NAT_GATEWAY_NAME} (scoped to ${VPC_CONNECTOR_SUBNET})"
+      --nat-custom-subnet-ip-ranges="${VPC_SUBNET}"
+  echo "  Created: ${NAT_GATEWAY_NAME} (scoped to ${VPC_SUBNET})"
 else
   echo "  Already exists: ${NAT_GATEWAY_NAME}"
 fi
@@ -155,31 +151,18 @@ gcloud builds submit "${_PROXY_DIR}" \
     --project="${PROJECT_ID}"
 echo "  Image pushed: ${_IMAGE}"
 
-# ── Step 7: Serverless VPC Access Connector ───────────────────────────────────
+# ── Step 7: Deploy Cloud Run service ─────────────────────────────────────────
+# --network / --subnet: Direct VPC Egress — no Serverless VPC Access Connector needed.
+# --vpc-egress=all-traffic: every outbound byte goes through the VPC subnet and
+#   Cloud NAT so Snowflake always sees the static IP.
 echo ""
-echo "=== Step 7: Serverless VPC Access Connector ==="
-if ! gcloud compute networks vpc-access connectors describe "${VPC_CONNECTOR_NAME}" \
-    --region="${REGION}" --project="${PROJECT_ID}" &>/dev/null; then
-  gcloud compute networks vpc-access connectors create "${VPC_CONNECTOR_NAME}" \
-      --region="${REGION}" \
-      --project="${PROJECT_ID}" \
-      --subnet="${VPC_CONNECTOR_SUBNET}"
-  echo "  Created: ${VPC_CONNECTOR_NAME} (subnet: ${VPC_CONNECTOR_SUBNET})"
-else
-  echo "  Already exists: ${VPC_CONNECTOR_NAME}"
-fi
-
-# ── Step 8: Deploy Cloud Run service ─────────────────────────────────────────
-# --ingress=all: Cloud Run URL is publicly reachable (required for Gemini Enterprise).
-# --vpc-egress=all-traffic: every outbound byte goes through Cloud NAT so
-#   Snowflake always sees the static IP.
-echo ""
-echo "=== Step 8: Deploying Cloud Run service ==="
+echo "=== Step 7: Deploying Cloud Run service ==="
 gcloud run deploy "${CLOUD_RUN_SERVICE_NAME}" \
     --image="${_IMAGE}" \
     --region="${REGION}" \
     --project="${PROJECT_ID}" \
-    --vpc-connector="${VPC_CONNECTOR_NAME}" \
+    --network="${VPC_NETWORK}" \
+    --subnet="${VPC_SUBNET}" \
     --vpc-egress=all-traffic \
     --set-env-vars="SNOWFLAKE_HOST=${SNOWFLAKE_HOST},SNOWFLAKE_PORT=${SNOWFLAKE_PORT}" \
     --port=8080 \

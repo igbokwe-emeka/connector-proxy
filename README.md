@@ -14,7 +14,7 @@ Gemini Enterprise connector
         ▼
 Cloud Run  (nginx — proxies all traffic to Snowflake)
         │  --ingress=all
-        │  --vpc-egress=all-traffic  →  Serverless VPC Access Connector
+        │  --vpc-egress=all-traffic  (Direct VPC Egress)
         ▼
 Cloud NAT  ──►  Static External IP
         │
@@ -22,14 +22,14 @@ Cloud NAT  ──►  Static External IP
 Snowflake  (account.snowflakecomputing.com:443)
 ```
 
-`--vpc-egress=all-traffic` forces every outbound byte from Cloud Run through the VPC connector and therefore through Cloud NAT, ensuring Snowflake always sees the static IP.
+`--vpc-egress=all-traffic` with Direct VPC Egress forces every outbound byte from Cloud Run directly through the VPC subnet and Cloud NAT, ensuring Snowflake always sees the static IP. No Serverless VPC Access Connector is required.
 
 ## Prerequisites
 
 - `gcloud` CLI authenticated (`gcloud auth login`)
 - A GCP project with billing enabled
 - An existing VPC network
-- A dedicated `/28` subnet for the VPC connector (no other resources in it)
+- A subnet within that VPC for Cloud Run Direct VPC Egress
 - A Cloud Router + NAT already configured on that subnet, **or** let the script create them
 - No local Docker required — the image is built in the cloud via Cloud Build
 
@@ -47,7 +47,7 @@ Snowflake  (account.snowflakecomputing.com:443)
    |---|---|
    | `PROJECT_ID` | GCP project ID |
    | `VPC_NETWORK` | VPC network name |
-   | `VPC_CONNECTOR_SUBNET` | Dedicated `/28` subnet name for the connector (no other resources) |
+   | `VPC_SUBNET` | Subnet for Cloud Run Direct VPC Egress |
    | `NAT_ROUTER_NAME` | Cloud Router name (created if it doesn't exist) |
    | `NAT_GATEWAY_NAME` | Cloud NAT name (created if it doesn't exist) |
    | `SNOWFLAKE_HOST` | Your Snowflake account hostname (e.g. `xy12345.snowflakecomputing.com`) |
@@ -82,10 +82,9 @@ Snowflake  (account.snowflakecomputing.com:443)
 | Resource | Purpose |
 |---|---|
 | Static external IP (regional) | Fixed egress address for Snowflake's allowlist |
-| Cloud Router + NAT | Routes VPC connector egress through the static IP |
+| Cloud Router + NAT | Routes VPC subnet egress through the static IP |
 | Artifact Registry repo | Stores the nginx proxy Docker image |
-| Cloud Run service | nginx proxy; all egress via VPC connector |
-| Serverless VPC Access Connector | Bridges Cloud Run egress into the VPC for Cloud NAT |
+| Cloud Run service | nginx proxy; Direct VPC Egress for static outbound IP |
 
 ## Proxy files
 
@@ -116,5 +115,4 @@ LIMIT 5;
 | Snowflake OAuth | Valid client credentials required to initiate any flow |
 | Snowflake network policy | Only the static egress IP is allowlisted — requests from any other IP are rejected by Snowflake |
 
-**Note on Global Load Balancer + Cloud Armor:** A Global HTTPS LB was evaluated and removed. When a custom LB domain is used, Gemini Enterprise's backend switches its OAuth token exchange from `POST /oauth/token-request` (correct) to `POST /oauth/authorize` (rejected by Snowflake with 405), breaking the OAuth flow. This occurs regardless of Cloud Armor rules and is caused by how Gemini's backend interprets the custom domain vs the Cloud Run URL. Using the Cloud Run URL directly avoids this entirely.
-
+**Note on Global Load Balancer + Cloud Armor:** A Global HTTPS LB was evaluated and removed. When a custom LB domain is used, Gemini Enterprise's backend switches its OAuth token exchange from `POST /oauth/token-request` (correct) to `POST /oauth/authorize` (rejected by Snowflake with 405), breaking the OAuth flow. Using the Cloud Run URL directly avoids this entirely.
